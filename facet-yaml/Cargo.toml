@@ -19,7 +19,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 [dependencies]
 facet.workspace = true
 facet-core.workspace = true
-facet-format = { path = "../facet-format", version = "0.50.0-rc.7" }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7", path = "../facet-format", }
 facet-reflect.workspace = true
 saphyr-parser = "0.0.6"
 zmij = { version = "1", optional = true }
@@ -35,7 +35,7 @@ datatest-stable = "0.3"
 divan = { workspace = true }
 facet = { workspace = true, features = ["std", "doc", "net", "iddqd"] }
 facet-default.workspace = true
-facet-format = { path = "../facet-format", features = ["net"] }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7", path = "../facet-format", features = ["net"] }
 facet-format-suite = { path = "../facet-format-suite", features = [
   "third-party",
   "net",

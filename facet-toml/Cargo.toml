@@ -18,7 +18,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 facet-core.workspace = true
-facet-format = { path = "../facet-format", version = "0.50.0-rc.7" }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7", path = "../facet-format", }
 facet-reflect.workspace = true
 zmij = { version = "1", optional = true }
 itoa = { version = "1", optional = true }
@@ -34,13 +34,13 @@ http-body-util = { version = "0.1", default-features = false, optional = true }
 [dev-dependencies]
 divan = { workspace = true }
 facet = { workspace = true, features = ["std", "doc", "net", "iddqd"] }
-facet-format = { path = "../facet-format", features = ["net", "tracing"] }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7", path = "../facet-format", features = ["net", "tracing"] }
 facet-format-suite = { path = "../facet-format-suite", features = [
   "third-party",
   "net",
 ] }
 facet-json-classics = { path = "../facet-json-classics" }
-facet-value = { path = "../facet-value" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.7", path = "../facet-value" }
 facet-testhelpers.workspace = true
 facet-reflect = { workspace = true, features = ["tracing"] }
 libtest-mimic = "0.8.1"

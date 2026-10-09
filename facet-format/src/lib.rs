@@ -2,6 +2,15 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![allow(unused_macros)]
 
+//! # Teamy fork
+//!
+//! `teamy-facet-format` is an unofficial TeamDman-maintained fork of `facet-format`,
+//! not an official facet-rs release. Rust imports retain the `facet_format` name.
+//! Use the matching `teamy-facet-*` family through Cargo package aliases.
+//! [Fork source](https://github.com/TeamDman/facet-format) and
+//! [immutable upstream base](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120).
+//! Original authorship and MIT OR Apache-2.0 licenses are preserved.
+//!
 //! Prototype types for the format deserializer.
 
 /// Trace-level logging macro that forwards to `tracing::trace!` when the `tracing` feature is enabled.

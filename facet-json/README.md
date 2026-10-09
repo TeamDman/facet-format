@@ -1,8 +1,23 @@
-# facet-json
+# teamy-facet-json
 
-[![crates.io](https://img.shields.io/crates/v/facet-json.svg)](https://crates.io/crates/facet-json)
-[![documentation](https://docs.rs/facet-json/badge.svg)](https://docs.rs/facet-json)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/facet-json.svg)](https://github.com/facet-rs/facet/blob/main/LICENSE-MIT)
+> **Unofficial fork:** `teamy-facet-json` is maintained by
+> [TeamDman](https://github.com/TeamDman/facet-format), independently of facet-rs.
+> It is not an official upstream release. The source derives from
+> [official Facet Format at `4279debff780ae1cd5b028201f446c26594b1120`](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120)
+> and the reviewed [Teamy integration](https://github.com/TeamDman/facet-format/tree/a1ca5f97253eb49fb080a39e32377dcebb0499f5).
+> Original attribution and MIT OR Apache-2.0 licenses are preserved.
+
+Install with the original Rust import name and the matching Teamy core:
+
+```toml
+[dependencies]
+facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.7" }
+```
+
+[![crates.io](https://img.shields.io/crates/v/teamy-facet-json.svg)](https://crates.io/crates/teamy-facet-json)
+[![documentation](https://docs.rs/teamy-facet-json/badge.svg)](https://docs.rs/teamy-facet-json)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/teamy-facet-json.svg)](https://github.com/facet-rs/facet/blob/main/LICENSE-MIT)
 
 `facet-json` is the JSON serializer and deserializer for the facet ecosystem. It
 reads and writes JSON for any type that derives `Facet` — no manual `Serialize`
