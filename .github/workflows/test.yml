@@ -2,18 +2,31 @@ name: Tests
 
 on:
   push:
-    branches: [main]
+    branches: [teamy-main]
   pull_request:
-    branches: [main]
+    branches: [teamy-main]
   merge_group:
+
+defaults:
+  run:
+    working-directory: facet-format
 
 jobs:
   test-linux:
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     env:
       PROPTEST_CASES: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -30,7 +43,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           rustup toolchain install nightly
-          cargo +nightly llvm-cov --no-report nextest --workspace --features facet-json/ci
+          cargo +nightly llvm-cov --no-report nextest --workspace --features teamy-facet-json/ci
           cargo +nightly llvm-cov --no-report --doc --workspace
           mkdir -p coverage
           cargo +nightly llvm-cov report --doctests --lcov --output-path coverage/lcov.info
@@ -38,14 +51,23 @@ jobs:
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
-          files: coverage/lcov.info
+          files: facet-format/coverage/lcov.info
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: false
 
   miri:
-    runs-on: blacksmith-16vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@nightly
         with:
@@ -65,9 +87,18 @@ jobs:
         run: just miri-json
 
   msrv:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -85,9 +116,18 @@ jobs:
         run: just msrv
 
   docs:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -104,9 +144,18 @@ jobs:
 
 
   lockfile:
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -126,6 +175,15 @@ jobs:
       PROPTEST_CASES: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -146,6 +204,15 @@ jobs:
       PROPTEST_CASES: 0
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: facet-format
+      - name: Checkout matching Teamy core family
+        uses: actions/checkout@v7
+        with:
+          repository: TeamDman/facet
+          ref: teamy-main
+          path: facet
+          persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@stable
 

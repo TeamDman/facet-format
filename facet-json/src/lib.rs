@@ -1,6 +1,15 @@
 // Note: unsafe code is used for lifetime transmutes in from_slice_into/from_str_into
 // when BORROW=false, mirroring the approach used in facet-format's FormatDeserializer.
 
+//! # Teamy fork
+//!
+//! `teamy-facet-json` is an unofficial TeamDman-maintained fork of `facet-json`,
+//! not an official facet-rs release. Rust imports retain the `facet_json` name.
+//! Use the matching `teamy-facet-*` family through Cargo package aliases.
+//! [Fork source](https://github.com/TeamDman/facet-format) and
+//! [immutable upstream base](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120).
+//! Original authorship and MIT OR Apache-2.0 licenses are preserved.
+//!
 //! JSON parser and serializer using facet-format.
 //!
 //! This crate provides JSON support via the `FormatParser` trait.

@@ -1157,23 +1157,23 @@ dependencies = [
 name = "facet-asn1"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-format",
  "facet-format-suite",
- "facet-reflect",
- "facet-testhelpers",
  "libtest-mimic",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
 ]
 
 [[package]]
 name = "facet-atom"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-testhelpers",
  "facet-xml",
  "indoc",
+ "teamy-facet",
+ "teamy-facet-testhelpers",
  "tracing",
 ]
 
@@ -1183,11 +1183,11 @@ version = "0.50.0-rc.7"
 dependencies = [
  "camino",
  "datatest-stable",
- "facet",
- "facet-error",
- "facet-reflect",
  "facet-toml",
- "facet-value",
+ "teamy-facet",
+ "teamy-facet-error",
+ "teamy-facet-reflect",
+ "teamy-facet-value",
 ]
 
 [[package]]
@@ -1197,97 +1197,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a98216bc8499aa471b28db6138eddde13fa20a66320094ce0c67bd9e05ecb202"
 dependencies = [
  "autocfg",
- "bstr",
- "bytes",
- "bytestring",
- "camino",
- "chrono",
- "compact_str",
  "const-fnv1a-hash",
  "iddqd",
  "impls",
- "indexmap",
- "jiff",
- "lock_api",
- "num-complex",
- "ordered-float",
- "rust_decimal",
- "semver",
- "smallvec 1.15.2",
- "smartstring",
- "smol_str",
- "stable_deref_trait",
  "taxon",
- "tendril",
- "time",
- "ulid",
- "url",
- "uuid",
- "yoke",
 ]
 
 [[package]]
 name = "facet-csv"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-format",
- "facet-reflect",
  "itoa",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
  "zmij",
-]
-
-[[package]]
-name = "facet-default"
-version = "0.50.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7bfc01be2aed861045744a02a7b2741996b1ea145ff0c0084026facd111c6f8e"
-dependencies = [
- "facet",
-]
-
-[[package]]
-name = "facet-dessert"
-version = "0.50.0-rc.7"
-dependencies = [
- "facet-core",
- "facet-reflect",
 ]
 
 [[package]]
 name = "facet-dom"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet-core",
- "facet-dessert",
- "facet-reflect",
  "facet-singularize",
  "heck",
  "owo-colors",
- "tracing",
-]
-
-[[package]]
-name = "facet-error"
-version = "0.50.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11f783eb520006650cff4fda9379c0d6b755c0c34a463c7c7655928f0933fa09"
-dependencies = [
- "facet",
-]
-
-[[package]]
-name = "facet-format"
-version = "0.50.0-rc.7"
-dependencies = [
- "ariadne",
- "facet",
- "facet-core",
- "facet-dessert",
- "facet-path",
- "facet-reflect",
- "facet-solver",
+ "teamy-facet-core",
+ "teamy-facet-dessert",
+ "teamy-facet-reflect",
  "tracing",
 ]
 
@@ -1301,9 +1238,6 @@ dependencies = [
  "camino",
  "chrono",
  "compact_str",
- "facet",
- "facet-pretty",
- "facet-value",
  "iddqd",
  "indexmap",
  "indoc",
@@ -1314,45 +1248,15 @@ dependencies = [
  "serde",
  "smartstring",
  "smol_str",
+ "teamy-facet",
+ "teamy-facet-pretty",
+ "teamy-facet-value",
  "time",
  "tokio",
  "tracing",
  "ulid",
  "uuid",
  "yoke",
-]
-
-[[package]]
-name = "facet-json"
-version = "0.50.0-rc.7"
-dependencies = [
- "axum-core",
- "bstr",
- "codspeed-divan-compat",
- "compact_str",
- "facet",
- "facet-core",
- "facet-format",
- "facet-format-suite",
- "facet-json-classics",
- "facet-reflect",
- "facet-testhelpers",
- "http",
- "http-body-util",
- "indoc",
- "itoa",
- "lexical-parse-float",
- "lexical-parse-integer",
- "libtest-mimic",
- "mime",
- "proptest",
- "serde",
- "serde_json",
- "smol_str",
- "stacker",
- "tendril",
- "tracing",
- "zmij",
 ]
 
 [[package]]
@@ -1366,23 +1270,23 @@ dependencies = [
 name = "facet-json-schema"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-json",
  "insta",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-json",
 ]
 
 [[package]]
 name = "facet-lua"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-format",
  "facet-format-suite",
- "facet-reflect",
  "insta",
  "libtest-mimic",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
 ]
 
 [[package]]
@@ -1436,18 +1340,18 @@ version = "0.50.0-rc.7"
 dependencies = [
  "axum-core",
  "codspeed-divan-compat",
- "facet",
- "facet-core",
- "facet-format",
  "facet-format-suite",
  "facet-json-classics",
- "facet-reflect",
  "http",
  "http-body-util",
  "libtest-mimic",
  "rmp-serde",
  "serde",
  "serde_json",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
 ]
 
 [[package]]
@@ -1469,15 +1373,7 @@ dependencies = [
  "chrono",
  "codspeed-divan-compat",
  "compact_str",
- "facet",
- "facet-core",
- "facet-format",
- "facet-json",
  "facet-json-classics",
- "facet-path",
- "facet-reflect",
- "facet-testhelpers",
- "facet-value",
  "http",
  "http-body-util",
  "jiff",
@@ -1487,6 +1383,14 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "smartstring",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-json",
+ "teamy-facet-path",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
+ "teamy-facet-value",
  "time",
  "ulid",
  "uuid",
@@ -1509,9 +1413,9 @@ name = "facet-python"
 version = "0.50.0-rc.7"
 dependencies = [
  "chrono",
- "facet",
- "facet-core",
  "insta",
+ "teamy-facet",
+ "teamy-facet-core",
 ]
 
 [[package]]
@@ -1524,7 +1428,6 @@ dependencies = [
  "facet-path",
  "hashbrown 0.17.1",
  "smallvec 2.0.0-alpha.12",
- "tracing",
 ]
 
 [[package]]
@@ -1532,24 +1435,13 @@ name = "facet-singularize"
 version = "0.50.0-rc.7"
 dependencies = [
  "codspeed-divan-compat",
- "facet",
- "facet-json",
  "flate2",
  "rc-zip-sync",
  "rmp",
+ "teamy-facet",
+ "teamy-facet-json",
  "ureq",
  "wordfreq",
-]
-
-[[package]]
-name = "facet-solver"
-version = "0.50.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "69695b0d76c2a7cf4b56eaccd0dbbd3697eae3bacdd772cccc99715aaf6d8e65"
-dependencies = [
- "facet-core",
- "facet-reflect",
- "strsim",
 ]
 
 [[package]]
@@ -1557,34 +1449,11 @@ name = "facet-svg"
 version = "0.50.0-rc.7"
 dependencies = [
  "datatest-stable",
- "facet",
- "facet-testhelpers",
  "facet-xml",
  "rediff",
+ "teamy-facet",
+ "teamy-facet-testhelpers",
  "tracing",
-]
-
-[[package]]
-name = "facet-testhelpers"
-version = "0.50.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5d7d13a89a2c4c5b8a4918b90074290d16b3f4e06c0edaf5f74b6a212ec9f53"
-dependencies = [
- "color-backtrace",
- "facet-testhelpers-macros",
- "termcolor",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "facet-testhelpers-macros"
-version = "0.50.0-rc.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8dc404abfd9617796ed19ab2cf71a4660d713e58b136d498a087b368597a55f3"
-dependencies = [
- "quote",
- "unsynn",
 ]
 
 [[package]]
@@ -1593,14 +1462,8 @@ version = "0.50.0-rc.7"
 dependencies = [
  "axum-core",
  "codspeed-divan-compat",
- "facet",
- "facet-core",
- "facet-format",
  "facet-format-suite",
  "facet-json-classics",
- "facet-reflect",
- "facet-testhelpers",
- "facet-value",
  "http",
  "http-body-util",
  "indoc",
@@ -1608,6 +1471,12 @@ dependencies = [
  "libtest-mimic",
  "serde",
  "serde_json",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
+ "teamy-facet-value",
  "toml",
  "toml_parser",
  "zmij",
@@ -1618,9 +1487,9 @@ name = "facet-typescript"
 version = "0.50.0-rc.7"
 dependencies = [
  "chrono",
- "facet",
- "facet-core",
  "insta",
+ "teamy-facet",
+ "teamy-facet-core",
 ]
 
 [[package]]
@@ -1628,40 +1497,24 @@ name = "facet-urlencoded"
 version = "0.50.0-rc.7"
 dependencies = [
  "axum-core",
- "facet",
- "facet-core",
- "facet-reflect",
- "facet-testhelpers",
  "form_urlencoded",
  "http",
  "http-body-util",
  "log",
-]
-
-[[package]]
-name = "facet-value"
-version = "0.50.0-rc.7"
-dependencies = [
- "bolero",
- "codspeed-divan-compat",
- "facet",
- "facet-core",
- "facet-format",
- "facet-reflect",
- "facet-testhelpers",
- "indexmap",
- "kstring",
- "serde_json",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
 ]
 
 [[package]]
 name = "facet-xdr"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-format",
- "facet-reflect",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
  "xdr-codec",
 ]
 
@@ -1670,14 +1523,14 @@ name = "facet-xml"
 version = "0.50.0-rc.7"
 dependencies = [
  "axum-core",
- "facet",
- "facet-core",
  "facet-dom",
- "facet-reflect",
- "facet-testhelpers",
  "http",
  "http-body-util",
  "quick-xml",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
  "tracing",
 ]
 
@@ -1685,12 +1538,12 @@ dependencies = [
 name = "facet-xml-node"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
  "facet-dom",
- "facet-reflect",
- "facet-testhelpers",
  "facet-xml",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
 ]
 
 [[package]]
@@ -1700,13 +1553,8 @@ dependencies = [
  "axum-core",
  "codspeed-divan-compat",
  "datatest-stable",
- "facet",
- "facet-core",
- "facet-default",
- "facet-format",
  "facet-format-suite",
  "facet-json-classics",
- "facet-reflect",
  "http",
  "http-body-util",
  "indoc",
@@ -1716,6 +1564,11 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-default",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
  "zmij",
 ]
 
@@ -1723,10 +1576,10 @@ dependencies = [
 name = "facet-zod"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet",
- "facet-core",
- "facet-json",
  "insta",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-json",
 ]
 
 [[package]]
@@ -3601,6 +3454,227 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3acccfbd01e7cf4c7ea384b46df6ba3afb934ad88abd247f92998249854de968"
 dependencies = [
  "blake3",
+]
+
+[[package]]
+name = "teamy-facet"
+version = "0.50.0-rc.7"
+dependencies = [
+ "autocfg",
+ "teamy-facet-core",
+ "teamy-facet-macros",
+]
+
+[[package]]
+name = "teamy-facet-core"
+version = "0.50.0-rc.7"
+dependencies = [
+ "autocfg",
+ "bstr",
+ "bytes",
+ "bytestring",
+ "camino",
+ "chrono",
+ "compact_str",
+ "const-fnv1a-hash",
+ "iddqd",
+ "impls",
+ "indexmap",
+ "jiff",
+ "lock_api",
+ "num-complex",
+ "ordered-float",
+ "rust_decimal",
+ "semver",
+ "smallvec 1.15.2",
+ "smartstring",
+ "smol_str",
+ "stable_deref_trait",
+ "taxon",
+ "tendril",
+ "time",
+ "ulid",
+ "url",
+ "uuid",
+ "yoke",
+]
+
+[[package]]
+name = "teamy-facet-default"
+version = "0.50.0-rc.7"
+dependencies = [
+ "teamy-facet",
+]
+
+[[package]]
+name = "teamy-facet-dessert"
+version = "0.50.0-rc.7"
+dependencies = [
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+]
+
+[[package]]
+name = "teamy-facet-error"
+version = "0.50.0-rc.7"
+dependencies = [
+ "teamy-facet",
+]
+
+[[package]]
+name = "teamy-facet-format"
+version = "0.50.0-rc.7"
+dependencies = [
+ "ariadne",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-dessert",
+ "teamy-facet-path",
+ "teamy-facet-reflect",
+ "teamy-facet-solver",
+ "tracing",
+]
+
+[[package]]
+name = "teamy-facet-json"
+version = "0.50.0-rc.7"
+dependencies = [
+ "axum-core",
+ "bstr",
+ "codspeed-divan-compat",
+ "compact_str",
+ "facet-format-suite",
+ "facet-json-classics",
+ "http",
+ "http-body-util",
+ "indoc",
+ "itoa",
+ "lexical-parse-float",
+ "lexical-parse-integer",
+ "libtest-mimic",
+ "mime",
+ "proptest",
+ "serde",
+ "serde_json",
+ "smol_str",
+ "stacker",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
+ "tendril",
+ "tracing",
+ "zmij",
+]
+
+[[package]]
+name = "teamy-facet-macro-parse"
+version = "0.50.0-rc.7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "teamy-facet-macro-types",
+]
+
+[[package]]
+name = "teamy-facet-macro-types"
+version = "0.50.0-rc.7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unsynn",
+]
+
+[[package]]
+name = "teamy-facet-macros"
+version = "0.50.0-rc.7"
+dependencies = [
+ "teamy-facet-macros-impl",
+]
+
+[[package]]
+name = "teamy-facet-macros-impl"
+version = "0.50.0-rc.7"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "teamy-facet-macro-parse",
+ "teamy-facet-macro-types",
+ "unsynn",
+]
+
+[[package]]
+name = "teamy-facet-path"
+version = "0.50.0-rc.7"
+dependencies = [
+ "teamy-facet-core",
+]
+
+[[package]]
+name = "teamy-facet-pretty"
+version = "0.50.0-rc.7"
+dependencies = [
+ "owo-colors",
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+ "terminal-light",
+]
+
+[[package]]
+name = "teamy-facet-reflect"
+version = "0.50.0-rc.7"
+dependencies = [
+ "hashbrown 0.17.1",
+ "smallvec 2.0.0-alpha.12",
+ "teamy-facet-core",
+ "teamy-facet-path",
+ "tracing",
+]
+
+[[package]]
+name = "teamy-facet-solver"
+version = "0.50.0-rc.7"
+dependencies = [
+ "strsim",
+ "teamy-facet-core",
+ "teamy-facet-reflect",
+]
+
+[[package]]
+name = "teamy-facet-testhelpers"
+version = "0.50.0-rc.7"
+dependencies = [
+ "color-backtrace",
+ "teamy-facet-testhelpers-macros",
+ "termcolor",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "teamy-facet-testhelpers-macros"
+version = "0.50.0-rc.7"
+dependencies = [
+ "quote",
+ "unsynn",
+]
+
+[[package]]
+name = "teamy-facet-value"
+version = "0.50.0-rc.7"
+dependencies = [
+ "bolero",
+ "codspeed-divan-compat",
+ "indexmap",
+ "kstring",
+ "serde_json",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
+ "teamy-facet-testhelpers",
 ]
 
 [[package]]

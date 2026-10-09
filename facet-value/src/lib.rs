@@ -1,3 +1,12 @@
+//! # Teamy fork
+//!
+//! `teamy-facet-value` is an unofficial TeamDman-maintained fork of `facet-value`,
+//! not an official facet-rs release. Rust imports retain the `facet_value` name.
+//! Use the matching `teamy-facet-*` family through Cargo package aliases.
+//! [Fork source](https://github.com/TeamDman/facet-format) and
+//! [immutable upstream base](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120).
+//! Original authorship and MIT OR Apache-2.0 licenses are preserved.
+//!
 //! `facet-value` provides a memory-efficient dynamic value type for representing
 //! structured data similar to JSON, but with added support for binary data and datetime.
 //!

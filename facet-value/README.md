@@ -1,10 +1,23 @@
-# facet-value
+# teamy-facet-value
 
-[![Coverage Status](https://coveralls.io/repos/github/facet-rs/facet-value/badge.svg?branch=main)](https://coveralls.io/github/facet-rs/facet?branch=main)
-[![crates.io](https://img.shields.io/crates/v/facet-value.svg)](https://crates.io/crates/facet-value)
-[![documentation](https://docs.rs/facet-value/badge.svg)](https://docs.rs/facet-value)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/facet-value.svg)](./LICENSE)
-[![Discord](https://img.shields.io/discord/1379550208551026748?logo=discord&label=discord)](https://discord.gg/JhD7CwCJ8F)
+> **Unofficial fork:** `teamy-facet-value` is maintained by
+> [TeamDman](https://github.com/TeamDman/facet-format), independently of facet-rs.
+> It is not an official upstream release. The source derives from
+> [official Facet Format at `4279debff780ae1cd5b028201f446c26594b1120`](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120)
+> and the reviewed [Teamy integration](https://github.com/TeamDman/facet-format/tree/a1ca5f97253eb49fb080a39e32377dcebb0499f5).
+> Original attribution and MIT OR Apache-2.0 licenses are preserved.
+
+Install with the original Rust import name and the matching Teamy core:
+
+```toml
+[dependencies]
+facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.7" }
+```
+
+[![crates.io](https://img.shields.io/crates/v/teamy-facet-value.svg)](https://crates.io/crates/teamy-facet-value)
+[![documentation](https://docs.rs/teamy-facet-value/badge.svg)](https://docs.rs/teamy-facet-value)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/teamy-facet-value.svg)](LICENSE-MIT)
 
 <!-- cargo-reedme: start -->
 

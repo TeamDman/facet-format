@@ -1,14 +1,20 @@
 [package]
-name = "facet-dessert"
+name = "teamy-facet-dessert"
 version = "0.50.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Sweet helpers for facet deserialization - shared between facet-format and facet-dom"
+description = "TeamDman-maintained fork of facet-dessert: Sweet helpers for facet deserialization - shared between facet-format and facet-dom"
 keywords = ["serialization", "deserialization", "facet", "reflection"]
 categories = ["encoding", "parsing"]
-homepage = "https://facet.rs"
+homepage = "https://github.com/TeamDman/facet-format"
+documentation = "https://docs.rs/teamy-facet-dessert"
+readme = "README.md"
+
+[lib]
+name = "facet_dessert"
+path = "src/lib.rs"
 
 [package.metadata]
 
