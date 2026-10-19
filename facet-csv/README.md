@@ -12,7 +12,7 @@ Install with the original Rust import name and the matching Teamy core:
 ```toml
 [dependencies]
 facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
-facet-csv = { package = "teamy-facet-csv", version = "=0.50.0-rc.7" }
+facet-csv = { package = "teamy-facet-csv", version = "=0.50.0-rc.8" }
 ```
 
 The Teamy packages use distinct Cargo identities from upstream. Use the matching
