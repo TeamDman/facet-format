@@ -1204,18 +1204,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-csv"
-version = "0.50.0-rc.7"
-dependencies = [
- "itoa",
- "teamy-facet",
- "teamy-facet-core",
- "teamy-facet-format",
- "teamy-facet-reflect",
- "zmij",
-]
-
-[[package]]
 name = "facet-dom"
 version = "0.50.0-rc.7"
 dependencies = [
@@ -3497,6 +3485,18 @@ dependencies = [
  "url",
  "uuid",
  "yoke",
+]
+
+[[package]]
+name = "teamy-facet-csv"
+version = "0.50.0-rc.7"
+dependencies = [
+ "itoa",
+ "teamy-facet",
+ "teamy-facet-core",
+ "teamy-facet-format",
+ "teamy-facet-reflect",
+ "zmij",
 ]
 
 [[package]]
