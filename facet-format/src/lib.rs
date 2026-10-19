@@ -72,7 +72,9 @@ pub use evidence::FieldEvidence;
 pub use parser::{EnumVariantHint, FormatParser, SavePoint, ScalarTypeHint};
 pub use serializer::{
     DynamicValueEncoding, DynamicValueTag, EnumVariantEncoding, FieldOrdering, FormatSerializer,
-    MapEncoding, SerializeError, StructFieldMode, serialize_root, serialize_value_with_shape,
+    MapEncoding, SerializeContext, SerializeError, StructFieldMode, serialize_root,
+    serialize_root_with_cancellation, serialize_value_with_shape,
+    serialize_value_with_shape_with_cancellation,
 };
 pub use solver::{SolveOutcome, SolveVariantError, solve_variant};
 pub use visitor::{FieldMatch, StructFieldTracker};
