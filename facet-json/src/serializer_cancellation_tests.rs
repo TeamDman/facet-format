@@ -9,7 +9,11 @@ fn cancellation_after(checks: &AtomicUsize, limit: usize) -> impl Fn() -> bool +
 
 #[test]
 fn large_ascii_and_escaped_utf8_strings_stop_inside_one_scalar() {
-    for text in ["x".repeat(100_000), "雪\n\"é".repeat(25_000)] {
+    for text in [
+        "x".repeat(100_000),
+        "雪💚é".repeat(25_000),
+        "雪\n\"é".repeat(25_000),
+    ] {
         let checks = AtomicUsize::new(0);
         let checker = cancellation_after(&checks, 4);
         let mut serializer =
@@ -20,6 +24,16 @@ fn large_ascii_and_escaped_utf8_strings_stop_inside_one_scalar() {
         assert!(error.is_cancelled());
         assert!(!serializer.out.is_empty());
         assert!(serializer.out.len() < text.len());
+    }
+}
+
+#[test]
+fn del_escaping_is_consistent_across_scan_and_write_boundaries() {
+    for prefix_length in [0, 15, 16, 4095, 4096] {
+        let padding = "x".repeat(prefix_length);
+        let value = format!("{padding}\u{7f}");
+        let expected = format!("\"{padding}\\u007f\"");
+        assert_eq!(to_string(&value).unwrap(), expected);
     }
 }
 

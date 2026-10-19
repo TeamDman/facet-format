@@ -71,16 +71,46 @@ operations expose `JsonSerializeError::is_cancelled()`. When driving
 `JsonSerializer::with_options(options)` through Facet Format directly, also pass
 the checker to `facet_format::serialize_root_with_cancellation` for traversal checks.
 
-Writer helpers still buffer the complete JSON document before writing. When a
-checker is configured, they also check between bounded writes and retries after
-`Interrupted`. Errors retain a typed serialization error inside an `Other` I/O
-error, so cancellation is not retried as an interrupted write. A failed writer
-may retain a partial JSON prefix; discard it when an atomic complete document is
-required. Allocations, user formatting/proxy callbacks, standard UTF-8 string
-validation, and one blocked operating-system write cannot be preempted internally.
-String helpers check before and after that validation scan. Integrate execution
-scopes by checking whether the scope may stop rather than raw cancellation intent,
+Writer helpers stream directly to the supplied sink. A configured checker is
+observed during traversal, scalar emission, writes, and retries after
+`Interrupted`. Original I/O errors retain their kind and typed payload;
+callback cancellation is an `Other` I/O error containing
+`SerializeError::Cancelled`, so it is not retried as an interrupted write.
+Allocations, user formatting/proxy callbacks, standard UTF-8 string validation,
+and one blocked operating-system write cannot be preempted internally. String
+helpers check before and after that validation scan. Integrate execution scopes
+by checking whether the scope may stop rather than raw cancellation intent,
 so required-completion scopes remain protected.
+
+## Writer ownership and streaming
+
+`to_writer_std`, `to_writer_std_pretty`, and `to_writer_std_with_options` emit JSON
+as traversal proceeds. They do not assemble a complete document first, install
+an internal `BufWriter`, or call the destination's `flush` method. Some encoding
+steps make small writes; callers choose buffering and explicitly handle its
+flush result:
+
+```rust
+use std::io::{BufWriter, Write};
+
+let mut destination = BufWriter::new(Vec::new());
+facet_json::to_writer_std(&mut destination, &vec![1_u32, 2, 3])?;
+destination.flush()?;
+# Ok::<(), std::io::Error>(())
+```
+
+`JsonSerializer::from_writer(writer, options)` exposes the same writer-backed
+encoder to low-level Facet Format callers. `finish()` returns the supplied sink
+without flushing it. Passing `&mut` retains ownership of a buffer, file, or other
+resource in the caller, including when serialization fails. An owned sink's own
+`Drop` behavior still follows its type's normal rules.
+
+The existing Vec and String helpers collect their results using this same
+encoder. A serialization error, cancellation request, or writer failure can leave
+a partial JSON prefix in a streaming destination, and earlier writes cannot be
+rolled back. When a complete durable document is required, callers can write to
+a temporary file, check serialization and flush/persistence results, then publish
+the completed artifact.
 
 ## License
 
