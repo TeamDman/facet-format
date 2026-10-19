@@ -166,10 +166,16 @@ impl SerializeOptions<'_> {
     }
 }
 
+/// A JSON encoding, cancellation, or destination-writing failure.
+///
+/// Low-level I/O failures expose the original writer error through
+/// [`std::error::Error::source`]. Standard writer helpers return that original
+/// error directly, preserving its kind and custom payload.
 #[derive(Debug)]
 pub struct JsonSerializeError {
     msg: &'static str,
     cancelled: bool,
+    io_error: Option<std::io::Error>,
 }
 
 impl JsonSerializeError {
@@ -178,21 +184,40 @@ impl JsonSerializeError {
         self.cancelled
     }
 
+    fn from_io(error: std::io::Error) -> Self {
+        Self {
+            msg: "JSON output write failed",
+            cancelled: false,
+            io_error: Some(error),
+        }
+    }
+
     const fn cancelled() -> Self {
         Self {
             msg: "JSON serialization cancelled",
             cancelled: true,
+            io_error: None,
         }
     }
 }
 
 impl core::fmt::Display for JsonSerializeError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(self.msg)
+        if let Some(error) = &self.io_error {
+            error.fmt(f)
+        } else {
+            f.write_str(self.msg)
+        }
     }
 }
 
-impl std::error::Error for JsonSerializeError {}
+impl std::error::Error for JsonSerializeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.io_error
+            .as_ref()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 enum Ctx {
@@ -200,9 +225,13 @@ enum Ctx {
     Seq { first: bool },
 }
 
-/// JSON serializer with configurable formatting options.
-pub struct JsonSerializer<'cancel> {
-    out: Vec<u8>,
+/// JSON serializer with configurable formatting and a caller-owned output sink.
+///
+/// [`Self::new`] and [`Self::with_options`] collect bytes in the default `Vec`.
+/// [`Self::from_writer`] emits directly into its writer, without an internal
+/// output buffer or implicit flush. A failed operation may leave a JSON prefix.
+pub struct JsonSerializer<'cancel, W = Vec<u8>> {
+    out: W,
     stack: Vec<Ctx>,
     options: SerializeOptions<'cancel>,
 }
@@ -226,7 +255,20 @@ impl<'cancel> JsonSerializer<'cancel> {
 /// Input chunk budget between scalar cancellation checkpoints.
 const CANCELLATION_CHUNK_SIZE: usize = 4096;
 
-impl JsonSerializer<'_> {
+impl<'cancel, W: std::io::Write> JsonSerializer<'cancel, W> {
+    /// Serialize directly into a caller-supplied writer with existing options.
+    ///
+    /// No output buffer is installed and writes may be small. Callers choose
+    /// buffering explicitly, usually by passing `&mut BufWriter<_>`. Neither
+    /// serialization nor [`Self::finish`] calls the writer's `flush` method.
+    pub const fn from_writer(writer: W, options: SerializeOptions<'cancel>) -> Self {
+        Self {
+            out: writer,
+            stack: Vec::new(),
+            options,
+        }
+    }
+
     fn check_cancellation(&self) -> Result<(), JsonSerializeError> {
         if self.options.cancellation.is_some_and(|check| check()) {
             Err(JsonSerializeError::cancelled())
@@ -237,18 +279,39 @@ impl JsonSerializer<'_> {
 
     fn write_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
         if self.options.cancellation.is_none() {
-            self.out.extend_from_slice(bytes);
-            return Ok(());
+            return self
+                .out
+                .write_all(bytes)
+                .map_err(JsonSerializeError::from_io);
         }
         for chunk in bytes.chunks(CANCELLATION_CHUNK_SIZE) {
-            self.check_cancellation()?;
-            self.out.extend_from_slice(chunk);
+            let mut remaining = chunk;
+            while !remaining.is_empty() {
+                self.check_cancellation()?;
+                match self.out.write(remaining) {
+                    Ok(0) => {
+                        return Err(JsonSerializeError::from_io(
+                            std::io::ErrorKind::WriteZero.into(),
+                        ));
+                    }
+                    Ok(written) => remaining = &remaining[written..],
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(error) => return Err(JsonSerializeError::from_io(error)),
+                }
+            }
         }
         self.check_cancellation()
     }
 
-    /// Consume the serializer and return the output bytes.
-    pub fn finish(self) -> Vec<u8> {
+    fn write_byte(&mut self, byte: u8) -> Result<(), JsonSerializeError> {
+        self.write_raw_bytes(&[byte])
+    }
+
+    /// Return the output sink without flushing it.
+    ///
+    /// The default sink is a `Vec<u8>`. A caller-supplied writer is returned as-is;
+    /// the caller retains responsibility for buffering, flushing, and persistence.
+    pub fn finish(self) -> W {
         self.out
     }
 
@@ -260,7 +323,7 @@ impl JsonSerializer<'_> {
     /// Write a newline and indentation if in pretty mode.
     fn write_indent(&mut self) -> Result<(), JsonSerializeError> {
         if self.options.pretty {
-            self.out.push(b'\n');
+            self.write_byte(b'\n')?;
             for _ in 0..self.depth() {
                 self.write_raw_bytes(self.options.indent.as_bytes())?;
             }
@@ -272,10 +335,11 @@ impl JsonSerializer<'_> {
         self.check_cancellation()?;
         match self.stack.last_mut() {
             Some(Ctx::Seq { first }) => {
-                if !*first {
-                    self.out.push(b',');
-                }
+                let needs_comma = !*first;
                 *first = false;
+                if needs_comma {
+                    self.write_byte(b',')?;
+                }
                 self.write_indent()?;
             }
             Some(Ctx::Struct { .. }) => {
@@ -286,75 +350,71 @@ impl JsonSerializer<'_> {
         Ok(())
     }
 
-    /// Optimized JSON string writing with SIMD-like 16-byte fast path.
+    /// Write borrowed unescaped runs directly, checking at bounded write boundaries.
     ///
-    /// For ASCII strings without special characters, processes 16 bytes at a time.
-    /// Falls back to character-by-character escaping when needed.
+    /// JSON escapes are ASCII bytes. Non-ASCII UTF-8 bytes can pass through
+    /// unchanged, including when a writer splits a run inside a code point.
     fn write_json_string(&mut self, s: &str) -> Result<(), JsonSerializeError> {
         const STEP_SIZE: usize = 16; // u128 = 16 bytes
         type Chunk = [u8; STEP_SIZE];
 
         self.check_cancellation()?;
-        self.out.push(b'"');
+        self.write_byte(b'"')?;
 
-        let mut unchecked = 0;
-        let mut s = s;
-        while let Some(Ok(chunk)) = s.as_bytes().get(..STEP_SIZE).map(Chunk::try_from) {
-            if unchecked >= CANCELLATION_CHUNK_SIZE {
-                self.check_cancellation()?;
-                unchecked = 0;
-            }
-            let previous_len = s.len();
-            let window = u128::from_ne_bytes(chunk);
-            // Check all 16 bytes at once:
-            // 1. All ASCII (high bit clear): window & 0x80...80 == 0
-            // 2. No quotes (0x22): !contains_byte(window, 0x22)
-            // 3. No backslashes (0x5c): !contains_byte(window, 0x5c)
-            // 4. No control chars (< 0x20): top 3 bits set for all bytes
-            let completely_ascii = window & 0x80808080808080808080808080808080 == 0;
-            let quote_free = !contains_byte(window, 0x22);
-            let backslash_free = !contains_byte(window, 0x5c);
-            let control_char_free = no_control_chars(window);
-
-            if completely_ascii && quote_free && backslash_free && control_char_free {
-                // Fast path: copy 16 bytes directly
-                self.out.extend_from_slice(&chunk);
-                s = &s[STEP_SIZE..];
-            } else {
-                // Slow path: escape character by character for this chunk
-                let mut chars = s.chars();
-                let mut count = STEP_SIZE;
-                for c in &mut chars {
-                    self.write_json_escaped_char(c);
-                    count = count.saturating_sub(c.len_utf8());
-                    if count == 0 {
-                        break;
-                    }
+        let bytes = s.as_bytes();
+        let mut run_start = 0_usize;
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            let run_end = run_start
+                .saturating_add(CANCELLATION_CHUNK_SIZE)
+                .min(bytes.len());
+            while let Some(Ok(chunk)) = bytes[cursor..run_end].get(..STEP_SIZE).map(Chunk::try_from)
+            {
+                let window = u128::from_ne_bytes(chunk);
+                if contains_byte(window, b'"')
+                    || contains_byte(window, b'\\')
+                    || contains_byte(window, 0x7f)
+                    || !no_control_chars(window)
+                {
+                    break;
                 }
-                s = chars.as_str();
+                cursor += STEP_SIZE;
             }
-            unchecked += previous_len - s.len();
+            // Finish a short window or find the exact escape within a SWAR window.
+            while cursor < run_end
+                && bytes[cursor] != b'"'
+                && bytes[cursor] != b'\\'
+                && bytes[cursor] != 0x7f
+                && bytes[cursor] >= 0x20
+            {
+                cursor += 1;
+            }
+
+            if cursor > run_start {
+                self.write_raw_bytes(&bytes[run_start..cursor])?;
+            }
+            if cursor < run_end {
+                // Only ASCII quote, backslash, and control bytes reach this branch.
+                self.write_json_escaped_char(char::from(bytes[cursor]))?;
+                cursor += 1;
+            }
+            run_start = cursor;
         }
 
-        // Handle remaining bytes (< 16)
-        for c in s.chars() {
-            self.write_json_escaped_char(c);
-        }
-
-        self.out.push(b'"');
+        self.write_byte(b'"')?;
         self.check_cancellation()
     }
 
     #[inline]
-    fn write_json_escaped_char(&mut self, c: char) {
+    fn write_json_escaped_char(&mut self, c: char) -> Result<(), JsonSerializeError> {
         match c {
-            '"' => self.out.extend_from_slice(b"\\\""),
-            '\\' => self.out.extend_from_slice(b"\\\\"),
-            '\n' => self.out.extend_from_slice(b"\\n"),
-            '\r' => self.out.extend_from_slice(b"\\r"),
-            '\t' => self.out.extend_from_slice(b"\\t"),
-            '\u{08}' => self.out.extend_from_slice(b"\\b"),
-            '\u{0C}' => self.out.extend_from_slice(b"\\f"),
+            '"' => self.write_raw_bytes(b"\\\"")?,
+            '\\' => self.write_raw_bytes(b"\\\\")?,
+            '\n' => self.write_raw_bytes(b"\\n")?,
+            '\r' => self.write_raw_bytes(b"\\r")?,
+            '\t' => self.write_raw_bytes(b"\\t")?,
+            '\u{08}' => self.write_raw_bytes(b"\\b")?,
+            '\u{0C}' => self.write_raw_bytes(b"\\f")?,
             c if c.is_ascii_control() => {
                 let code_point = c as u32;
                 let to_hex = |d: u32| {
@@ -372,50 +432,50 @@ impl JsonSerializer<'_> {
                     to_hex((code_point >> 4) & 0xF),
                     to_hex(code_point & 0xF),
                 ];
-                self.out.extend_from_slice(&buf);
+                self.write_raw_bytes(&buf)?;
             }
             c if c.is_ascii() => {
-                self.out.push(c as u8);
+                self.write_byte(c as u8)?;
             }
             c => {
                 let mut buf = [0u8; 4];
                 let len = c.encode_utf8(&mut buf).len();
-                self.out.extend_from_slice(&buf[..len]);
+                self.write_raw_bytes(&buf[..len])?;
             }
         }
+        Ok(())
     }
 
     #[inline]
-    fn write_hex_byte(&mut self, byte: u8) {
+    fn write_hex_byte(&mut self, byte: u8) -> Result<(), JsonSerializeError> {
         let hi = byte >> 4;
         let lo = byte & 0x0f;
-        self.out
-            .push(if hi < 10 { b'0' + hi } else { b'a' + (hi - 10) });
-        self.out
-            .push(if lo < 10 { b'0' + lo } else { b'a' + (lo - 10) });
+        self.write_byte(if hi < 10 { b'0' + hi } else { b'a' + (hi - 10) })?;
+        self.write_byte(if lo < 10 { b'0' + lo } else { b'a' + (lo - 10) })?;
+        Ok(())
     }
 
     #[inline]
-    fn write_u8_decimal(&mut self, value: u8) {
+    fn write_u8_decimal(&mut self, value: u8) -> Result<(), JsonSerializeError> {
         #[cfg(feature = "fast")]
-        self.out
-            .extend_from_slice(itoa::Buffer::new().format(value).as_bytes());
+        self.write_raw_bytes(itoa::Buffer::new().format(value).as_bytes())?;
         #[cfg(not(feature = "fast"))]
-        self.out.extend_from_slice(value.to_string().as_bytes());
+        self.write_raw_bytes(value.to_string().as_bytes())?;
+        Ok(())
     }
 
     fn write_bytes_array(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
-        self.out.push(b'[');
+        self.write_byte(b'[')?;
         for (index, byte) in bytes.iter().copied().enumerate() {
             if index % 1024 == 0 {
                 self.check_cancellation()?;
             }
             if index != 0 {
-                self.out.push(b',');
+                self.write_byte(b',')?;
             }
-            self.write_u8_decimal(byte);
+            self.write_u8_decimal(byte)?;
         }
-        self.out.push(b']');
+        self.write_byte(b']')?;
         self.check_cancellation()
     }
 
@@ -424,15 +484,15 @@ impl JsonSerializer<'_> {
         bytes: &[u8],
         options: HexBytesOptions,
     ) -> Result<(), JsonSerializeError> {
-        self.out.push(b'"');
-        self.out.extend_from_slice(b"0x");
+        self.write_byte(b'"')?;
+        self.write_raw_bytes(b"0x")?;
 
         let should_truncate = options
             .truncate_above
             .is_some_and(|max_len| bytes.len() > max_len);
         if !should_truncate {
             self.write_hex_bytes(bytes)?;
-            self.out.push(b'"');
+            self.write_byte(b'"')?;
             return self.check_cancellation();
         }
 
@@ -443,19 +503,18 @@ impl JsonSerializer<'_> {
         self.write_hex_bytes(&bytes[..head])?;
 
         let omitted = bytes.len().saturating_sub(head + tail);
-        self.out.extend_from_slice(b"..<");
+        self.write_raw_bytes(b"..<")?;
         #[cfg(feature = "fast")]
-        self.out
-            .extend_from_slice(itoa::Buffer::new().format(omitted).as_bytes());
+        self.write_raw_bytes(itoa::Buffer::new().format(omitted).as_bytes())?;
         #[cfg(not(feature = "fast"))]
-        self.out.extend_from_slice(omitted.to_string().as_bytes());
-        self.out.extend_from_slice(b" bytes>..");
+        self.write_raw_bytes(omitted.to_string().as_bytes())?;
+        self.write_raw_bytes(b" bytes>..")?;
 
         if tail != 0 {
             self.write_hex_bytes(&bytes[bytes.len() - tail..])?;
         }
 
-        self.out.push(b'"');
+        self.write_byte(b'"')?;
         self.check_cancellation()
     }
 
@@ -463,7 +522,7 @@ impl JsonSerializer<'_> {
         for chunk in bytes.chunks(1024) {
             self.check_cancellation()?;
             for byte in chunk {
-                self.write_hex_byte(*byte);
+                self.write_hex_byte(*byte)?;
             }
         }
         Ok(())
@@ -506,12 +565,12 @@ impl Default for JsonSerializer<'_> {
     }
 }
 
-impl FormatSerializer for JsonSerializer<'_> {
+impl<W: std::io::Write> FormatSerializer for JsonSerializer<'_, W> {
     type Error = JsonSerializeError;
 
     fn begin_struct(&mut self) -> Result<(), Self::Error> {
         self.before_value()?;
-        self.out.push(b'{');
+        self.write_byte(b'{')?;
         self.stack.push(Ctx::Struct { first: true });
         Ok(())
     }
@@ -519,21 +578,23 @@ impl FormatSerializer for JsonSerializer<'_> {
     fn field_key(&mut self, key: &str) -> Result<(), Self::Error> {
         match self.stack.last_mut() {
             Some(Ctx::Struct { first }) => {
-                if !*first {
-                    self.out.push(b',');
-                }
+                let needs_comma = !*first;
                 *first = false;
+                if needs_comma {
+                    self.write_byte(b',')?;
+                }
                 self.write_indent()?;
                 self.write_json_string(key)?;
-                self.out.push(b':');
+                self.write_byte(b':')?;
                 if self.options.pretty {
-                    self.out.push(b' ');
+                    self.write_byte(b' ')?;
                 }
                 Ok(())
             }
             _ => Err(JsonSerializeError {
                 msg: "field_key called outside of a struct",
                 cancelled: false,
+                io_error: None,
             }),
         }
     }
@@ -546,19 +607,20 @@ impl FormatSerializer for JsonSerializer<'_> {
                     self.write_indent()?;
                 }
                 self.check_cancellation()?;
-                self.out.push(b'}');
+                self.write_byte(b'}')?;
                 Ok(())
             }
             _ => Err(JsonSerializeError {
                 msg: "end_struct called without matching begin_struct",
                 cancelled: false,
+                io_error: None,
             }),
         }
     }
 
     fn begin_seq(&mut self) -> Result<(), Self::Error> {
         self.before_value()?;
-        self.out.push(b'[');
+        self.write_byte(b'[')?;
         self.stack.push(Ctx::Seq { first: true });
         Ok(())
     }
@@ -571,12 +633,13 @@ impl FormatSerializer for JsonSerializer<'_> {
                     self.write_indent()?;
                 }
                 self.check_cancellation()?;
-                self.out.push(b']');
+                self.write_byte(b']')?;
                 Ok(())
             }
             _ => Err(JsonSerializeError {
                 msg: "end_seq called without matching begin_seq",
                 cancelled: false,
+                io_error: None,
             }),
         }
     }
@@ -584,56 +647,51 @@ impl FormatSerializer for JsonSerializer<'_> {
     fn scalar(&mut self, scalar: ScalarValue<'_>) -> Result<(), Self::Error> {
         self.before_value()?;
         match scalar {
-            ScalarValue::Null | ScalarValue::Unit => self.out.extend_from_slice(b"null"),
+            ScalarValue::Null | ScalarValue::Unit => self.write_raw_bytes(b"null")?,
             ScalarValue::Bool(v) => {
                 if v {
-                    self.out.extend_from_slice(b"true")
+                    self.write_raw_bytes(b"true")?
                 } else {
-                    self.out.extend_from_slice(b"false")
+                    self.write_raw_bytes(b"false")?
                 }
             }
             ScalarValue::Char(c) => {
-                self.out.push(b'"');
-                self.write_json_escaped_char(c);
-                self.out.push(b'"');
+                self.write_byte(b'"')?;
+                self.write_json_escaped_char(c)?;
+                self.write_byte(b'"')?;
             }
             ScalarValue::I64(v) => {
                 #[cfg(feature = "fast")]
-                self.out
-                    .extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
+                self.write_raw_bytes(itoa::Buffer::new().format(v).as_bytes())?;
                 #[cfg(not(feature = "fast"))]
-                self.out.extend_from_slice(v.to_string().as_bytes());
+                self.write_raw_bytes(v.to_string().as_bytes())?;
             }
             ScalarValue::U64(v) => {
                 #[cfg(feature = "fast")]
-                self.out
-                    .extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
+                self.write_raw_bytes(itoa::Buffer::new().format(v).as_bytes())?;
                 #[cfg(not(feature = "fast"))]
-                self.out.extend_from_slice(v.to_string().as_bytes());
+                self.write_raw_bytes(v.to_string().as_bytes())?;
             }
             ScalarValue::I128(v) => {
                 #[cfg(feature = "fast")]
-                self.out
-                    .extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
+                self.write_raw_bytes(itoa::Buffer::new().format(v).as_bytes())?;
                 #[cfg(not(feature = "fast"))]
-                self.out.extend_from_slice(v.to_string().as_bytes());
+                self.write_raw_bytes(v.to_string().as_bytes())?;
             }
             ScalarValue::U128(v) => {
                 #[cfg(feature = "fast")]
-                self.out
-                    .extend_from_slice(itoa::Buffer::new().format(v).as_bytes());
+                self.write_raw_bytes(itoa::Buffer::new().format(v).as_bytes())?;
                 #[cfg(not(feature = "fast"))]
-                self.out.extend_from_slice(v.to_string().as_bytes());
+                self.write_raw_bytes(v.to_string().as_bytes())?;
             }
             ScalarValue::F64(v) => {
                 if v.is_nan() || v.is_infinite() {
-                    self.out.extend_from_slice(b"null");
+                    self.write_raw_bytes(b"null")?;
                 } else {
                     #[cfg(feature = "fast")]
-                    self.out
-                        .extend_from_slice(zmij::Buffer::new().format(v).as_bytes());
+                    self.write_raw_bytes(zmij::Buffer::new().format(v).as_bytes())?;
                     #[cfg(not(feature = "fast"))]
-                    self.out.extend_from_slice(v.to_string().as_bytes());
+                    self.write_raw_bytes(v.to_string().as_bytes())?;
                 }
             }
             ScalarValue::Str(s) => self.write_json_string(&s)?,
@@ -642,6 +700,7 @@ impl FormatSerializer for JsonSerializer<'_> {
                 return Err(JsonSerializeError {
                     msg: "unsupported scalar value kind",
                     cancelled: false,
+                    io_error: None,
                 });
             }
         }
@@ -923,6 +982,10 @@ pub fn peek_to_string_with_options<'input, 'facet>(
 
 /// Serialize a value to JSON and write it to a `std::io::Write` writer.
 ///
+/// Writes directly without installing a buffer or calling `flush`. Callers may
+/// pass a borrowed `BufWriter` and flush it explicitly. See
+/// [`peek_to_writer_std_with_options`] for partial-output and error behavior.
+///
 /// # Example
 ///
 /// ```
@@ -950,6 +1013,10 @@ where
 
 /// Serialize a value to pretty-printed JSON and write it to a `std::io::Write` writer.
 ///
+/// Writes directly without installing a buffer or calling `flush`. Callers may
+/// pass a borrowed `BufWriter` and flush it explicitly. See
+/// [`peek_to_writer_std_with_options`] for partial-output and error behavior.
+///
 /// # Example
 ///
 /// ```
@@ -976,6 +1043,10 @@ where
 }
 
 /// Serialize a value to JSON with custom options and write it to a `std::io::Write` writer.
+///
+/// Writes directly without installing a buffer or calling `flush`. Callers may
+/// pass a borrowed `BufWriter` and flush it explicitly. See
+/// [`peek_to_writer_std_with_options`] for partial-output and error behavior.
 ///
 /// # Example
 ///
@@ -1037,32 +1108,40 @@ where
 
 /// Serialize a `Peek` instance to JSON with custom options and write it to a `std::io::Write` writer.
 ///
-/// JSON is fully buffered before writing. With a cancellation checker, bounded
-/// writes and `Interrupted` retries observe cancellation; an individual blocked
-/// write cannot be preempted. Cancellation is an `Other` I/O error containing
+/// Serialization writes directly to the caller's sink, with no internal output
+/// buffer or implicit flush. Writes may be small; callers choose buffering and
+/// flush it explicitly. Serialization failure, cancellation, or I/O failure may
+/// leave a partial JSON prefix. The original writer error kind and payload are
+/// preserved, including when cancellation is requested during the failed write.
+/// A configured checker is observed during traversal and writes, including
+/// `Interrupted` retries; an individual blocked write cannot be preempted.
+/// Callback cancellation is an `Other` I/O error containing
 /// [`SerializeError::Cancelled`], rather than a retryable `Interrupted` error.
-/// A failed writer may retain a partial JSON prefix. Existing I/O failures win
-/// over cancellation requested concurrently with the failed write.
 pub fn peek_to_writer_std_with_options<'input, 'facet, W>(
-    mut writer: W,
+    writer: W,
     peek: Peek<'input, 'facet>,
     options: &SerializeOptions<'_>,
 ) -> std::io::Result<()>
 where
     W: std::io::Write,
 {
-    // Serialize to bytes first, then write
-    // This is simpler and avoids the complexity of incremental writes
-    let mut serializer = JsonSerializer::with_options(options.clone());
+    let mut serializer = JsonSerializer::from_writer(writer, options.clone());
     if let Some(checker) = options.cancellation {
         serialize_root_with_cancellation(&mut serializer, peek, checker)
             .map_err(normalize_cancellation)
-            .map_err(std::io::Error::other)?;
-        write_json_bytes_with_cancellation(&mut writer, &serializer.finish(), checker)
+            .map_err(serialization_io_error)
     } else {
-        serialize_root(&mut serializer, peek)
-            .map_err(|e| std::io::Error::other(alloc::format!("{:?}", e)))?;
-        writer.write_all(&serializer.finish())
+        serialize_root(&mut serializer, peek).map_err(serialization_io_error)
+    }
+}
+
+fn serialization_io_error(error: SerializeError<JsonSerializeError>) -> std::io::Error {
+    match error {
+        SerializeError::Backend(mut backend) => match backend.io_error.take() {
+            Some(error) => error,
+            None => std::io::Error::other(SerializeError::Backend(backend)),
+        },
+        other => std::io::Error::other(other),
     }
 }
 
@@ -1089,36 +1168,6 @@ fn finish_json_string(
         return Err(SerializeError::Cancelled);
     }
     Ok(json)
-}
-
-fn write_json_bytes_with_cancellation<W: std::io::Write>(
-    writer: &mut W,
-    bytes: &[u8],
-    should_cancel: &(dyn Fn() -> bool + Send + Sync),
-) -> std::io::Result<()> {
-    for chunk in bytes.chunks(CANCELLATION_CHUNK_SIZE) {
-        let mut remaining = chunk;
-        while !remaining.is_empty() {
-            check_write_cancellation(should_cancel)?;
-            match writer.write(remaining) {
-                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
-                Ok(written) => remaining = &remaining[written..],
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    check_write_cancellation(should_cancel)
-}
-
-fn check_write_cancellation(should_cancel: &dyn Fn() -> bool) -> std::io::Result<()> {
-    if should_cancel() {
-        Err(std::io::Error::other(
-            SerializeError::<JsonSerializeError>::Cancelled,
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 #[cfg(test)]
