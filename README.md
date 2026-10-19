@@ -14,25 +14,28 @@ continues in the [Facet monorepo](https://github.com/facet-rs/facet).
 Report Teamy packaging or fork issues to
 [TeamDman/facet-format](https://github.com/TeamDman/facet-format/issues).
 
-The publishing branch is `teamy-main`. This workspace prepares these packages
-as one compatible `0.50.0-rc.7` family:
+The publishing branch is `teamy-main`. Format, JSON, Value, and CSV use
+`0.50.0-rc.8`; Dessert and the core Facet family remain `0.50.0-rc.7`.
+Format/JSON add cooperative cancellation, and JSON writer helpers emit
+directly to caller-owned writers without an internal document buffer.
 
-| Published package | Rust library name |
-| --- | --- |
-| `teamy-facet-format` | `facet_format` |
-| `teamy-facet-dessert` | `facet_dessert` |
-| `teamy-facet-json` | `facet_json` |
-| `teamy-facet-value` | `facet_value` |
+| Published package | Version | Rust library name |
+| --- | --- | --- |
+| `teamy-facet-format` | `0.50.0-rc.8` | `facet_format` |
+| `teamy-facet-dessert` | `0.50.0-rc.7` | `facet_dessert` |
+| `teamy-facet-json` | `0.50.0-rc.8` | `facet_json` |
+| `teamy-facet-value` | `0.50.0-rc.8` | `facet_value` |
+| `teamy-facet-csv` | `0.50.0-rc.8` | `facet_csv` |
 
 Use Cargo package aliases to keep the original Rust import names:
 
 ```toml
 [dependencies]
 facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
-facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7" }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.8" }
 facet-dessert = { package = "teamy-facet-dessert", version = "=0.50.0-rc.7" }
-facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.7" }
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.7" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.8" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.8" }
 ```
 
 All public Facet types must come from the same Teamy core family. The fork
@@ -44,7 +47,7 @@ on `teamy-main` beside this repository as `../facet`. Versioned path
 dependencies use that checkout locally and become registry dependencies in
 Cargo's published manifests. Publish the Teamy core family first, then
 `teamy-facet-dessert`, `teamy-facet-format`, and finally
-`teamy-facet-json` and `teamy-facet-value`.
+`teamy-facet-json`, `teamy-facet-value`, and `teamy-facet-csv`.
 
 The complete library, integration, and documentation suites run from these
 source checkouts. Internal development dependencies use path-only package aliases

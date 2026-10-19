@@ -12,7 +12,7 @@ Install with the original Rust import name and the matching Teamy core:
 ```toml
 [dependencies]
 facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
-facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.7" }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.8" }
 ```
 
 ## Cooperative serialization cancellation
