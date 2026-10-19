@@ -47,6 +47,41 @@ with [`from_slice`] / [`to_vec`] for byte-oriented callers and
 [`to_string_pretty`] for human-readable output. Zero-copy deserialization of
 `&str` fields is available via [`from_str_borrowed`].
 
+## Cooperative serialization cancellation
+
+Attach a borrowed checker to the existing `SerializeOptions`; return `true` to
+stop. No cancellation-library dependency or static lifetime is required. The
+checker requires `Send + Sync`, preserving those traits on options and serializers:
+
+```rust
+use std::sync::atomic::{AtomicBool, Ordering};
+
+let stop = AtomicBool::new(false);
+let checker = || stop.load(Ordering::Relaxed);
+let options = facet_json::SerializeOptions::new().pretty().cancellation(&checker);
+let json = facet_json::to_string_with_options(&vec![1_u32, 2, 3], &options)?;
+# Ok::<(), facet_json::SerializeError<facet_json::JsonSerializeError>>(())
+```
+
+Existing `_with_options` helpers use the checker during shared value traversal
+and between bounded chunks of large strings, raw JSON, byte arrays/hex, and pretty
+indentation. Default options have no checker and retain their existing behavior.
+High-level helpers report `SerializeError::Cancelled`; low-level serializer
+operations expose `JsonSerializeError::is_cancelled()`. When driving
+`JsonSerializer::with_options(options)` through Facet Format directly, also pass
+the checker to `facet_format::serialize_root_with_cancellation` for traversal checks.
+
+Writer helpers still buffer the complete JSON document before writing. When a
+checker is configured, they also check between bounded writes and retries after
+`Interrupted`. Errors retain a typed serialization error inside an `Other` I/O
+error, so cancellation is not retried as an interrupted write. A failed writer
+may retain a partial JSON prefix; discard it when an atomic complete document is
+required. Allocations, user formatting/proxy callbacks, standard UTF-8 string
+validation, and one blocked operating-system write cannot be preempted internally.
+String helpers check before and after that validation scan. Integrate execution
+scopes by checking whether the scope may stop rather than raw cancellation intent,
+so required-completion scopes remain protected.
+
 ## License
 
 Licensed under either of:

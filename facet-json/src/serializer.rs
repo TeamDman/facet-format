@@ -3,12 +3,14 @@ extern crate alloc;
 use alloc::{string::String, vec::Vec};
 
 use facet_core::Facet;
-use facet_format::{FormatSerializer, ScalarValue, SerializeError, serialize_root};
+use facet_format::{
+    FormatSerializer, ScalarValue, SerializeError, serialize_root, serialize_root_with_cancellation,
+};
 use facet_reflect::Peek;
 
 /// Options for JSON serialization.
-#[derive(Debug, Clone)]
-pub struct SerializeOptions {
+#[derive(Clone)]
+pub struct SerializeOptions<'cancel> {
     /// Whether to pretty-print with indentation (default: false)
     pub pretty: bool,
 
@@ -17,14 +19,34 @@ pub struct SerializeOptions {
 
     /// How byte sequences (`Vec<u8>`, `[u8; N]`, `bytes::Bytes`, etc.) are serialized.
     pub bytes_format: BytesFormat,
+
+    /// A borrowed cooperative checker: `true` requests cancellation.
+    ///
+    /// Checks run during traversal, bounded scalar chunks, and writer progress.
+    /// No cancellation library or static lifetime is required. Allocations,
+    /// user-provided callbacks, UTF-8 validation, and blocked writes cannot be
+    /// preempted internally. `None` preserves the existing non-cancellable path.
+    pub cancellation: Option<&'cancel (dyn Fn() -> bool + Send + Sync)>,
 }
 
-impl Default for SerializeOptions {
+impl core::fmt::Debug for SerializeOptions<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SerializeOptions")
+            .field("pretty", &self.pretty)
+            .field("indent", &self.indent)
+            .field("bytes_format", &self.bytes_format)
+            .field("cancellation", &self.cancellation.map(|_| "<callback>"))
+            .finish()
+    }
+}
+
+impl Default for SerializeOptions<'_> {
     fn default() -> Self {
         Self {
             pretty: false,
             indent: "  ",
             bytes_format: BytesFormat::default(),
+            cancellation: None,
         }
     }
 }
@@ -83,10 +105,27 @@ impl HexBytesOptions {
     }
 }
 
-impl SerializeOptions {
+impl SerializeOptions<'_> {
     /// Create new default options (compact output).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach or replace a cooperative cancellation checker.
+    ///
+    /// This may shorten the callback's borrow when adapting cloned options to a
+    /// local execution scope. The checker requires `Send + Sync`, preserving
+    /// those auto traits on options and serializers without requiring `'static`.
+    pub const fn cancellation<'cancel>(
+        self,
+        cancellation: &'cancel (dyn Fn() -> bool + Send + Sync),
+    ) -> SerializeOptions<'cancel> {
+        SerializeOptions {
+            pretty: self.pretty,
+            indent: self.indent,
+            bytes_format: self.bytes_format,
+            cancellation: Some(cancellation),
+        }
     }
 
     /// Enable pretty-printing with default indentation.
@@ -130,6 +169,21 @@ impl SerializeOptions {
 #[derive(Debug)]
 pub struct JsonSerializeError {
     msg: &'static str,
+    cancelled: bool,
+}
+
+impl JsonSerializeError {
+    /// Whether a low-level JSON scalar operation stopped at a cancellation checkpoint.
+    pub const fn is_cancelled(&self) -> bool {
+        self.cancelled
+    }
+
+    const fn cancelled() -> Self {
+        Self {
+            msg: "JSON serialization cancelled",
+            cancelled: true,
+        }
+    }
 }
 
 impl core::fmt::Display for JsonSerializeError {
@@ -147,25 +201,50 @@ enum Ctx {
 }
 
 /// JSON serializer with configurable formatting options.
-pub struct JsonSerializer {
+pub struct JsonSerializer<'cancel> {
     out: Vec<u8>,
     stack: Vec<Ctx>,
-    options: SerializeOptions,
+    options: SerializeOptions<'cancel>,
 }
 
-impl JsonSerializer {
+impl<'cancel> JsonSerializer<'cancel> {
     /// Create a new JSON serializer with default (compact) options.
     pub fn new() -> Self {
         Self::with_options(SerializeOptions::default())
     }
 
     /// Create a new JSON serializer with the given options.
-    pub const fn with_options(options: SerializeOptions) -> Self {
+    pub const fn with_options(options: SerializeOptions<'cancel>) -> Self {
         Self {
             out: Vec::new(),
             stack: Vec::new(),
             options,
         }
+    }
+}
+
+/// Input chunk budget between scalar cancellation checkpoints.
+const CANCELLATION_CHUNK_SIZE: usize = 4096;
+
+impl JsonSerializer<'_> {
+    fn check_cancellation(&self) -> Result<(), JsonSerializeError> {
+        if self.options.cancellation.is_some_and(|check| check()) {
+            Err(JsonSerializeError::cancelled())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn write_raw_bytes(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
+        if self.options.cancellation.is_none() {
+            self.out.extend_from_slice(bytes);
+            return Ok(());
+        }
+        for chunk in bytes.chunks(CANCELLATION_CHUNK_SIZE) {
+            self.check_cancellation()?;
+            self.out.extend_from_slice(chunk);
+        }
+        self.check_cancellation()
     }
 
     /// Consume the serializer and return the output bytes.
@@ -179,23 +258,25 @@ impl JsonSerializer {
     }
 
     /// Write a newline and indentation if in pretty mode.
-    fn write_indent(&mut self) {
+    fn write_indent(&mut self) -> Result<(), JsonSerializeError> {
         if self.options.pretty {
             self.out.push(b'\n');
             for _ in 0..self.depth() {
-                self.out.extend_from_slice(self.options.indent.as_bytes());
+                self.write_raw_bytes(self.options.indent.as_bytes())?;
             }
         }
+        Ok(())
     }
 
     fn before_value(&mut self) -> Result<(), JsonSerializeError> {
+        self.check_cancellation()?;
         match self.stack.last_mut() {
             Some(Ctx::Seq { first }) => {
                 if !*first {
                     self.out.push(b',');
                 }
                 *first = false;
-                self.write_indent();
+                self.write_indent()?;
             }
             Some(Ctx::Struct { .. }) => {
                 // struct values are separated by `field_key`
@@ -209,14 +290,21 @@ impl JsonSerializer {
     ///
     /// For ASCII strings without special characters, processes 16 bytes at a time.
     /// Falls back to character-by-character escaping when needed.
-    fn write_json_string(&mut self, s: &str) {
+    fn write_json_string(&mut self, s: &str) -> Result<(), JsonSerializeError> {
         const STEP_SIZE: usize = 16; // u128 = 16 bytes
         type Chunk = [u8; STEP_SIZE];
 
+        self.check_cancellation()?;
         self.out.push(b'"');
 
+        let mut unchecked = 0;
         let mut s = s;
         while let Some(Ok(chunk)) = s.as_bytes().get(..STEP_SIZE).map(Chunk::try_from) {
+            if unchecked >= CANCELLATION_CHUNK_SIZE {
+                self.check_cancellation()?;
+                unchecked = 0;
+            }
+            let previous_len = s.len();
             let window = u128::from_ne_bytes(chunk);
             // Check all 16 bytes at once:
             // 1. All ASCII (high bit clear): window & 0x80...80 == 0
@@ -245,6 +333,7 @@ impl JsonSerializer {
                 }
                 s = chars.as_str();
             }
+            unchecked += previous_len - s.len();
         }
 
         // Handle remaining bytes (< 16)
@@ -253,6 +342,7 @@ impl JsonSerializer {
         }
 
         self.out.push(b'"');
+        self.check_cancellation()
     }
 
     #[inline]
@@ -314,18 +404,26 @@ impl JsonSerializer {
         self.out.extend_from_slice(value.to_string().as_bytes());
     }
 
-    fn write_bytes_array(&mut self, bytes: &[u8]) {
+    fn write_bytes_array(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
         self.out.push(b'[');
         for (index, byte) in bytes.iter().copied().enumerate() {
+            if index % 1024 == 0 {
+                self.check_cancellation()?;
+            }
             if index != 0 {
                 self.out.push(b',');
             }
             self.write_u8_decimal(byte);
         }
         self.out.push(b']');
+        self.check_cancellation()
     }
 
-    fn write_bytes_hex(&mut self, bytes: &[u8], options: HexBytesOptions) {
+    fn write_bytes_hex(
+        &mut self,
+        bytes: &[u8],
+        options: HexBytesOptions,
+    ) -> Result<(), JsonSerializeError> {
         self.out.push(b'"');
         self.out.extend_from_slice(b"0x");
 
@@ -333,20 +431,16 @@ impl JsonSerializer {
             .truncate_above
             .is_some_and(|max_len| bytes.len() > max_len);
         if !should_truncate {
-            for byte in bytes {
-                self.write_hex_byte(*byte);
-            }
+            self.write_hex_bytes(bytes)?;
             self.out.push(b'"');
-            return;
+            return self.check_cancellation();
         }
 
         let head = options.head.min(bytes.len());
         let max_tail = bytes.len().saturating_sub(head);
         let tail = options.tail.min(max_tail);
 
-        for byte in &bytes[..head] {
-            self.write_hex_byte(*byte);
-        }
+        self.write_hex_bytes(&bytes[..head])?;
 
         let omitted = bytes.len().saturating_sub(head + tail);
         self.out.extend_from_slice(b"..<");
@@ -358,15 +452,24 @@ impl JsonSerializer {
         self.out.extend_from_slice(b" bytes>..");
 
         if tail != 0 {
-            for byte in &bytes[bytes.len() - tail..] {
-                self.write_hex_byte(*byte);
-            }
+            self.write_hex_bytes(&bytes[bytes.len() - tail..])?;
         }
 
         self.out.push(b'"');
+        self.check_cancellation()
     }
 
-    fn write_bytes_with_options(&mut self, bytes: &[u8]) {
+    fn write_hex_bytes(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
+        for chunk in bytes.chunks(1024) {
+            self.check_cancellation()?;
+            for byte in chunk {
+                self.write_hex_byte(*byte);
+            }
+        }
+        Ok(())
+    }
+
+    fn write_bytes_with_options(&mut self, bytes: &[u8]) -> Result<(), JsonSerializeError> {
         match self.options.bytes_format {
             BytesFormat::Array => self.write_bytes_array(bytes),
             BytesFormat::Hex(options) => self.write_bytes_hex(bytes, options),
@@ -397,13 +500,13 @@ const fn no_control_chars(value: u128) -> bool {
     has_zero == 0
 }
 
-impl Default for JsonSerializer {
+impl Default for JsonSerializer<'_> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FormatSerializer for JsonSerializer {
+impl FormatSerializer for JsonSerializer<'_> {
     type Error = JsonSerializeError;
 
     fn begin_struct(&mut self) -> Result<(), Self::Error> {
@@ -420,8 +523,8 @@ impl FormatSerializer for JsonSerializer {
                     self.out.push(b',');
                 }
                 *first = false;
-                self.write_indent();
-                self.write_json_string(key);
+                self.write_indent()?;
+                self.write_json_string(key)?;
                 self.out.push(b':');
                 if self.options.pretty {
                     self.out.push(b' ');
@@ -430,6 +533,7 @@ impl FormatSerializer for JsonSerializer {
             }
             _ => Err(JsonSerializeError {
                 msg: "field_key called outside of a struct",
+                cancelled: false,
             }),
         }
     }
@@ -439,13 +543,15 @@ impl FormatSerializer for JsonSerializer {
             Some(Ctx::Struct { first }) => {
                 // Only add newline/indent before closing brace if struct was non-empty
                 if !first {
-                    self.write_indent();
+                    self.write_indent()?;
                 }
+                self.check_cancellation()?;
                 self.out.push(b'}');
                 Ok(())
             }
             _ => Err(JsonSerializeError {
                 msg: "end_struct called without matching begin_struct",
+                cancelled: false,
             }),
         }
     }
@@ -462,13 +568,15 @@ impl FormatSerializer for JsonSerializer {
             Some(Ctx::Seq { first }) => {
                 // Only add newline/indent before closing bracket if seq was non-empty
                 if !first {
-                    self.write_indent();
+                    self.write_indent()?;
                 }
+                self.check_cancellation()?;
                 self.out.push(b']');
                 Ok(())
             }
             _ => Err(JsonSerializeError {
                 msg: "end_seq called without matching begin_seq",
+                cancelled: false,
             }),
         }
     }
@@ -528,11 +636,12 @@ impl FormatSerializer for JsonSerializer {
                     self.out.extend_from_slice(v.to_string().as_bytes());
                 }
             }
-            ScalarValue::Str(s) => self.write_json_string(&s),
-            ScalarValue::Bytes(bytes) => self.write_bytes_with_options(bytes.as_ref()),
+            ScalarValue::Str(s) => self.write_json_string(&s)?,
+            ScalarValue::Bytes(bytes) => self.write_bytes_with_options(bytes.as_ref())?,
             _ => {
                 return Err(JsonSerializeError {
                     msg: "unsupported scalar value kind",
+                    cancelled: false,
                 });
             }
         }
@@ -541,7 +650,7 @@ impl FormatSerializer for JsonSerializer {
 
     fn serialize_byte_sequence(&mut self, bytes: &[u8]) -> Result<bool, Self::Error> {
         self.before_value()?;
-        self.write_bytes_with_options(bytes);
+        self.write_bytes_with_options(bytes)?;
         Ok(true)
     }
 
@@ -556,8 +665,7 @@ impl FormatSerializer for JsonSerializer {
     fn raw_scalar(&mut self, content: &str) -> Result<(), Self::Error> {
         // For RawJson, output the content directly without escaping
         self.before_value()?;
-        self.out.extend_from_slice(content.as_bytes());
-        Ok(())
+        self.write_raw_bytes(content.as_bytes())
     }
 
     fn format_namespace(&self) -> Option<&'static str> {
@@ -611,6 +719,10 @@ where
 
 /// Serialize a value to JSON bytes with custom options.
 ///
+/// A configured [`SerializeOptions::cancellation`] checker stops traversal and
+/// bounded scalar work with [`SerializeError::Cancelled`]. The checker may
+/// borrow caller state; allocations and user callbacks cannot be preempted.
+///
 /// # Example
 ///
 /// ```
@@ -632,13 +744,18 @@ where
 /// ```
 pub fn to_vec_with_options<'facet, T>(
     value: &'_ T,
-    options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> Result<Vec<u8>, SerializeError<JsonSerializeError>>
 where
     T: Facet<'facet> + ?Sized,
 {
     let mut serializer = JsonSerializer::with_options(options.clone());
-    serialize_root(&mut serializer, Peek::new(value))?;
+    if let Some(checker) = options.cancellation {
+        serialize_root_with_cancellation(&mut serializer, Peek::new(value), checker)
+            .map_err(normalize_cancellation)?;
+    } else {
+        serialize_root(&mut serializer, Peek::new(value))?;
+    }
     Ok(serializer.finish())
 }
 
@@ -661,9 +778,7 @@ pub fn to_string<'facet, T>(value: &'_ T) -> Result<String, SerializeError<JsonS
 where
     T: Facet<'facet> + ?Sized,
 {
-    let bytes = to_vec(value)?;
-    // JSON output is always valid UTF-8, so this unwrap is safe
-    Ok(String::from_utf8(bytes).expect("JSON output should always be valid UTF-8"))
+    to_string_with_options(value, &SerializeOptions::default())
 }
 
 /// Serialize a value to a pretty-printed JSON string.
@@ -687,8 +802,7 @@ pub fn to_string_pretty<'facet, T>(
 where
     T: Facet<'facet> + ?Sized,
 {
-    let bytes = to_vec_pretty(value)?;
-    Ok(String::from_utf8(bytes).expect("JSON output should always be valid UTF-8"))
+    to_string_with_options(value, &SerializeOptions::default().pretty())
 }
 
 /// Serialize a value to a JSON string with custom options.
@@ -714,13 +828,13 @@ where
 /// ```
 pub fn to_string_with_options<'facet, T>(
     value: &'_ T,
-    options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> Result<String, SerializeError<JsonSerializeError>>
 where
     T: Facet<'facet> + ?Sized,
 {
     let bytes = to_vec_with_options(value, options)?;
-    Ok(String::from_utf8(bytes).expect("JSON output should always be valid UTF-8"))
+    finish_json_string(bytes, options.cancellation)
 }
 
 // ── Peek-based serialization ──
@@ -793,12 +907,16 @@ pub fn peek_to_string_pretty<'input, 'facet>(
 /// ```
 pub fn peek_to_string_with_options<'input, 'facet>(
     peek: Peek<'input, 'facet>,
-    options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> Result<String, SerializeError<JsonSerializeError>> {
     let mut serializer = JsonSerializer::with_options(options.clone());
-    serialize_root(&mut serializer, peek)?;
-    let bytes = serializer.finish();
-    Ok(String::from_utf8(bytes).expect("JSON output should always be valid UTF-8"))
+    if let Some(checker) = options.cancellation {
+        serialize_root_with_cancellation(&mut serializer, peek, checker)
+            .map_err(normalize_cancellation)?;
+    } else {
+        serialize_root(&mut serializer, peek)?;
+    }
+    finish_json_string(serializer.finish(), options.cancellation)
 }
 
 // ── Writer-based serialization (std::io::Write) ──
@@ -886,7 +1004,7 @@ where
 pub fn to_writer_std_with_options<'facet, W, T>(
     writer: W,
     value: &T,
-    options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> std::io::Result<()>
 where
     W: std::io::Write,
@@ -918,10 +1036,17 @@ where
 }
 
 /// Serialize a `Peek` instance to JSON with custom options and write it to a `std::io::Write` writer.
+///
+/// JSON is fully buffered before writing. With a cancellation checker, bounded
+/// writes and `Interrupted` retries observe cancellation; an individual blocked
+/// write cannot be preempted. Cancellation is an `Other` I/O error containing
+/// [`SerializeError::Cancelled`], rather than a retryable `Interrupted` error.
+/// A failed writer may retain a partial JSON prefix. Existing I/O failures win
+/// over cancellation requested concurrently with the failed write.
 pub fn peek_to_writer_std_with_options<'input, 'facet, W>(
     mut writer: W,
     peek: Peek<'input, 'facet>,
-    options: &SerializeOptions,
+    options: &SerializeOptions<'_>,
 ) -> std::io::Result<()>
 where
     W: std::io::Write,
@@ -929,10 +1054,76 @@ where
     // Serialize to bytes first, then write
     // This is simpler and avoids the complexity of incremental writes
     let mut serializer = JsonSerializer::with_options(options.clone());
-    serialize_root(&mut serializer, peek)
-        .map_err(|e| std::io::Error::other(alloc::format!("{:?}", e)))?;
-    writer.write_all(&serializer.finish())
+    if let Some(checker) = options.cancellation {
+        serialize_root_with_cancellation(&mut serializer, peek, checker)
+            .map_err(normalize_cancellation)
+            .map_err(std::io::Error::other)?;
+        write_json_bytes_with_cancellation(&mut writer, &serializer.finish(), checker)
+    } else {
+        serialize_root(&mut serializer, peek)
+            .map_err(|e| std::io::Error::other(alloc::format!("{:?}", e)))?;
+        writer.write_all(&serializer.finish())
+    }
 }
+
+fn normalize_cancellation(
+    error: SerializeError<JsonSerializeError>,
+) -> SerializeError<JsonSerializeError> {
+    match error {
+        SerializeError::Backend(error) if error.is_cancelled() => SerializeError::Cancelled,
+        other => other,
+    }
+}
+
+fn finish_json_string(
+    bytes: Vec<u8>,
+    cancellation: Option<&(dyn Fn() -> bool + Send + Sync)>,
+) -> Result<String, SerializeError<JsonSerializeError>> {
+    if cancellation.is_some_and(|check| check()) {
+        return Err(SerializeError::Cancelled);
+    }
+    // The standard library validates UTF-8 synchronously; it cannot call the
+    // checker during that scan, so observe cancellation at both boundaries.
+    let json = String::from_utf8(bytes).expect("JSON output should always be valid UTF-8");
+    if cancellation.is_some_and(|check| check()) {
+        return Err(SerializeError::Cancelled);
+    }
+    Ok(json)
+}
+
+fn write_json_bytes_with_cancellation<W: std::io::Write>(
+    writer: &mut W,
+    bytes: &[u8],
+    should_cancel: &(dyn Fn() -> bool + Send + Sync),
+) -> std::io::Result<()> {
+    for chunk in bytes.chunks(CANCELLATION_CHUNK_SIZE) {
+        let mut remaining = chunk;
+        while !remaining.is_empty() {
+            check_write_cancellation(should_cancel)?;
+            match writer.write(remaining) {
+                Ok(0) => return Err(std::io::ErrorKind::WriteZero.into()),
+                Ok(written) => remaining = &remaining[written..],
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    check_write_cancellation(should_cancel)
+}
+
+fn check_write_cancellation(should_cancel: &dyn Fn() -> bool) -> std::io::Result<()> {
+    if should_cancel() {
+        Err(std::io::Error::other(
+            SerializeError::<JsonSerializeError>::Cancelled,
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+#[path = "serializer_cancellation_tests.rs"]
+mod cancellation_tests;
 
 #[cfg(test)]
 mod tests {
