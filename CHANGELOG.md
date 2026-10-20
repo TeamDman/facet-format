@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Teamy Format/JSON 0.50.0-rc.9] - 2026-10-20
+
+### Changed
+
+- Stream shared serialization fields and flattened map entries in declaration order instead of collecting the complete field inventory before emission.
+- Remove the Teamy serialization cancellation callbacks and cancellation-only errors. Writer-backed serializers propagate the caller's original I/O errors, allowing cancellation-aware writers to own cancellation and deferral policy.
+- Retain direct JSON writer output, bounded string scanning, caller-owned buffering and flushing, and proxy cleanup on backend errors or unwinding.
+
 ## [0.50.0-rc.7](https://github.com/facet-rs/facet-format/compare/facet-zod-v0.50.0-rc.6...facet-zod-v0.50.0-rc.7) - 2026-08-20
 
 ### Added

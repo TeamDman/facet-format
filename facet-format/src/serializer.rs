@@ -12,6 +12,29 @@ use facet_reflect::{
 
 use crate::ScalarValue;
 
+/// Extract a string from a Peek value, handling metadata containers.
+///
+/// For metadata containers like `Spanned<String>` or `Documented<String>`,
+/// this unwraps to find the inner value field and extracts the string from it.
+fn extract_string_from_peek<'mem, 'facet>(peek: Peek<'mem, 'facet>) -> Option<&'mem str> {
+    // First try direct string extraction
+    if let Some(s) = peek.as_str() {
+        return Some(s);
+    }
+
+    if peek.shape().is_metadata_container()
+        && let Ok(container) = peek.into_struct()
+    {
+        for (field, value) in container.fields() {
+            if !field.is_metadata() {
+                return extract_string_from_peek(value);
+            }
+        }
+    }
+
+    None
+}
+
 /// Field ordering preference for serialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[non_exhaustive]
@@ -548,8 +571,6 @@ pub trait FormatSerializer {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum SerializeError<E: Debug> {
-    /// Cooperative cancellation was requested before serialization completed.
-    Cancelled,
     /// Format backend error.
     Backend(E),
     /// Reflection failed while traversing the value.
@@ -563,7 +584,6 @@ pub enum SerializeError<E: Debug> {
 impl<E: Debug> core::fmt::Display for SerializeError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            SerializeError::Cancelled => f.write_str("serialization cancelled"),
             SerializeError::Backend(_) => f.write_str("format serializer error"),
             SerializeError::Reflect(err) => write!(f, "{err}"),
             SerializeError::Unsupported(msg) => f.write_str(msg.as_ref()),
@@ -601,7 +621,6 @@ pub struct SerializeContext<'s, S: FormatSerializer> {
     serializer: &'s mut S,
     path: alloc::vec::Vec<PathSegment>,
     current_field: Option<facet_core::Field>,
-    should_cancel: Option<&'s dyn Fn() -> bool>,
 }
 
 impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
@@ -611,44 +630,7 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             serializer,
             path: alloc::vec::Vec::new(),
             current_field: None,
-            should_cancel: None,
         }
-    }
-
-    /// Create a context that checks a borrowed cancellation predicate while traversing.
-    ///
-    /// `true` requests cancellation. The callback may borrow caller-owned state and
-    /// need not be `Send`, `Sync`, or `'static`. Checks occur between traversal work
-    /// and backend calls; a backend, user formatter, or proxy must provide its own
-    /// checkpoints to interrupt a long-running call internally. An interrupted
-    /// serializer may contain a partial document and should be discarded.
-    pub fn with_cancellation(serializer: &'s mut S, should_cancel: &'s dyn Fn() -> bool) -> Self {
-        Self {
-            serializer,
-            path: alloc::vec::Vec::new(),
-            current_field: None,
-            should_cancel: Some(should_cancel),
-        }
-    }
-
-    fn check_cancellation(&self) -> Result<(), SerializeError<S::Error>> {
-        check_cancellation(self.should_cancel)
-    }
-
-    fn collect_fields<I>(
-        &self,
-        fields: I,
-    ) -> Result<alloc::vec::Vec<I::Item>, SerializeError<S::Error>>
-    where
-        I: Iterator,
-    {
-        let mut collected = alloc::vec::Vec::new();
-        for field in fields {
-            self.check_cancellation()?;
-            collected.push(field);
-        }
-        self.check_cancellation()?;
-        Ok(collected)
     }
 
     fn with_field_context<T>(
@@ -709,17 +691,8 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         &mut self,
         value: Peek<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
-        self.check_cancellation()?;
-        self.serialize_impl_inner(value)?;
-        self.check_cancellation()
-    }
-
-    fn serialize_impl_inner<'mem, 'facet>(
-        &mut self,
-        value: Peek<'mem, 'facet>,
-    ) -> Result<(), SerializeError<S::Error>> {
         // Dereference pointers (Box, Arc, etc.) to get the underlying value
-        let value = self.deref_if_pointer(value)?;
+        let value = deref_if_pointer(value);
 
         // Check for raw serialization type (e.g., RawJson) BEFORE innermost_peek
         if self.serializer.raw_serialize_shape() == Some(value.shape()) {
@@ -728,24 +701,21 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     struct_.fields_for_binary_serialize().next()
                 && let Some(s) = inner_value.as_str()
             {
-                self.check_cancellation()?;
-                self.serializer
+                return self
+                    .serializer
                     .raw_scalar(s)
-                    .map_err(SerializeError::Backend)?;
-                return self.check_cancellation();
+                    .map_err(SerializeError::Backend);
             }
             return Err(SerializeError::Unsupported(Cow::Borrowed(
                 "raw capture type matched but could not extract inner string",
             )));
         }
 
-        self.check_cancellation()?;
-        let handled = self
+        if self
             .serializer
             .serialize_opaque_scalar_with_field(self.current_field.as_ref(), value.shape(), value)
-            .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
-        if handled {
+            .map_err(SerializeError::Backend)?
+        {
             return Ok(());
         }
 
@@ -755,17 +725,14 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         if value.shape().is_metadata_container()
             && let Ok(struct_) = value.into_struct()
         {
-            self.check_cancellation()?;
-            let handled = self
+            if self
                 .serializer
                 .serialize_metadata_container(&struct_)
-                .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
-            if handled {
+                .map_err(SerializeError::Backend)?
+            {
                 return Ok(());
             }
             for (field, field_value) in struct_.fields() {
-                self.check_cancellation()?;
                 if !field.is_metadata() {
                     return self.serialize_impl(field_value);
                 }
@@ -782,22 +749,20 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
 
         // Use typed_scalar for scalars
         if let Some(scalar_type) = value.scalar_type() {
-            self.check_cancellation()?;
-            self.serializer
+            return self
+                .serializer
                 .typed_scalar(scalar_type, value)
-                .map_err(SerializeError::Backend)?;
-            return self.check_cancellation();
+                .map_err(SerializeError::Backend);
         }
 
         // Fallback for Def::Scalar types with Display trait
         if matches!(value.shape().def, Def::Scalar) && value.shape().vtable.has_display() {
             use alloc::string::ToString;
             let formatted = value.to_string();
-            self.check_cancellation()?;
-            self.serializer
+            return self
+                .serializer
                 .scalar(ScalarValue::Str(Cow::Owned(formatted)))
-                .map_err(SerializeError::Backend)?;
-            return self.check_cancellation();
+                .map_err(SerializeError::Backend);
         }
 
         if let Ok(opt) = value.into_option() {
@@ -845,20 +810,15 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
     ) -> Result<(), SerializeError<S::Error>> {
         match opt.value() {
             Some(inner) => {
-                self.check_cancellation()?;
                 self.serializer
                     .begin_option_some()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 self.serialize_impl(inner)
             }
-            None => {
-                self.check_cancellation()?;
-                self.serializer
-                    .serialize_none()
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
-            }
+            None => self
+                .serializer
+                .serialize_none()
+                .map_err(SerializeError::Backend),
         }
     }
 
@@ -886,35 +846,28 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         };
 
         if self.serializer.enum_variant_encoding() == EnumVariantEncoding::Index {
-            self.check_cancellation()?;
             self.serializer
                 .begin_enum_variant(variant_index, variant_name)
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
             self.push(PathSegment::Variant(Cow::Borrowed(variant_name)));
             let result = self.serialize_impl(inner);
             self.pop();
             return result;
         }
 
-        self.check_cancellation()?;
         self.serializer
             .begin_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         self.serializer
             .field_key(variant_name)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         self.push(PathSegment::Variant(Cow::Borrowed(variant_name)));
         let result = self.serialize_impl(inner);
         self.pop();
         result?;
-        self.check_cancellation()?;
         self.serializer
             .end_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         Ok(())
     }
 
@@ -936,34 +889,37 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         let len = list.len();
 
         if let Some(bytes) = list.as_bytes() {
-            self.check_cancellation()?;
             let handled = match def {
-                facet_core::Def::Array(_) => self.serializer.serialize_byte_array(bytes),
-                _ => self.serializer.serialize_byte_sequence(bytes),
-            }
-            .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
+                facet_core::Def::Array(_) => self
+                    .serializer
+                    .serialize_byte_array(bytes)
+                    .map_err(SerializeError::Backend)?,
+                _ => self
+                    .serializer
+                    .serialize_byte_sequence(bytes)
+                    .map_err(SerializeError::Backend)?,
+            };
             if handled {
                 return Ok(());
             }
         }
 
-        self.check_cancellation()?;
         match def {
-            facet_core::Def::Array(_) => self.serializer.begin_seq(),
-            _ => self.serializer.begin_seq_with_len(len),
-        }
-        .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
+            facet_core::Def::Array(_) => self
+                .serializer
+                .begin_seq()
+                .map_err(SerializeError::Backend)?,
+            _ => self
+                .serializer
+                .begin_seq_with_len(len)
+                .map_err(SerializeError::Backend)?,
+        };
         for (idx, item) in list.iter().enumerate() {
-            self.check_cancellation()?;
             self.push(PathSegment::Index(idx));
             self.serialize_impl(item)?;
             self.pop();
         }
-        self.check_cancellation()?;
-        self.serializer.end_seq().map_err(SerializeError::Backend)?;
-        self.check_cancellation()
+        self.serializer.end_seq().map_err(SerializeError::Backend)
     }
 
     #[inline(never)]
@@ -982,7 +938,6 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         &self,
         key: Peek<'mem, 'facet>,
     ) -> Result<Cow<'mem, str>, SerializeError<S::Error>> {
-        self.check_cancellation()?;
         if let Some(proxy_def) = key
             .shape()
             .effective_proxy(self.serializer.format_namespace())
@@ -991,20 +946,15 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 .custom_serialization_with_proxy(proxy_def)
                 .map_err(|err| SerializeError::Unsupported(Cow::Owned(alloc::format!("{err}"))))?;
             let proxy_peek = proxy.as_peek().innermost_peek();
-            let key = self
-                .extract_string_from_peek(proxy_peek)?
+            let key = extract_string_from_peek(proxy_peek)
                 .map(ToString::to_string)
                 .unwrap_or_else(|| alloc::format!("{}", proxy_peek));
-            self.check_cancellation()?;
             return Ok(Cow::Owned(key));
         }
 
-        let key = self
-            .extract_string_from_peek(key)?
+        Ok(extract_string_from_peek(key)
             .map(Cow::Borrowed)
-            .unwrap_or_else(|| Cow::Owned(alloc::format!("{}", key)));
-        self.check_cancellation()?;
-        Ok(key)
+            .unwrap_or_else(|| Cow::Owned(alloc::format!("{}", key))))
     }
 
     #[inline(never)]
@@ -1013,22 +963,17 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         map: PeekMap<'mem, 'facet>,
         len: usize,
     ) -> Result<(), SerializeError<S::Error>> {
-        self.check_cancellation()?;
         self.serializer
             .begin_map_with_len(len)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         for (key, val) in map.iter() {
-            self.check_cancellation()?;
             self.serialize_impl(key)?;
             let key_str = self.map_key_string(key)?.into_owned();
             self.push(PathSegment::Field(Cow::Owned(key_str)));
             self.serialize_impl(val)?;
             self.pop();
         }
-        self.check_cancellation()?;
-        self.serializer.end_map().map_err(SerializeError::Backend)?;
-        self.check_cancellation()
+        self.serializer.end_map().map_err(SerializeError::Backend)
     }
 
     #[inline(never)]
@@ -1036,35 +981,27 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         &mut self,
         map: PeekMap<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
-        self.check_cancellation()?;
         self.serializer
             .begin_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         for (key, val) in map.iter() {
-            self.check_cancellation()?;
             let key_str = self.map_key_string(key)?;
-            self.check_cancellation()?;
-            let key_written = self
+            if !self
                 .serializer
                 .serialize_map_key(key)
-                .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
-            if !key_written {
+                .map_err(SerializeError::Backend)?
+            {
                 self.serializer
                     .field_key(&key_str)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
             }
             self.push(PathSegment::Field(Cow::Owned(key_str.into_owned())));
             self.serialize_impl(val)?;
             self.pop();
         }
-        self.check_cancellation()?;
         self.serializer
             .end_struct()
-            .map_err(SerializeError::Backend)?;
-        self.check_cancellation()
+            .map_err(SerializeError::Backend)
     }
 
     #[inline(never)]
@@ -1073,20 +1010,15 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         set: PeekSet<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
         let len = set.len();
-        self.check_cancellation()?;
         self.serializer
             .begin_seq_with_len(len)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         for (idx, item) in set.iter().enumerate() {
-            self.check_cancellation()?;
             self.push(PathSegment::Index(idx));
             self.serialize_impl(item)?;
             self.pop();
         }
-        self.check_cancellation()?;
-        self.serializer.end_seq().map_err(SerializeError::Backend)?;
-        self.check_cancellation()
+        self.serializer.end_seq().map_err(SerializeError::Backend)
     }
 
     fn serialize_field_value<'mem, 'facet>(
@@ -1112,11 +1044,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         struct_: facet_reflect::PeekStruct<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
         let kind = struct_.ty().kind;
-        self.check_cancellation()?;
         self.serializer
             .struct_metadata(shape)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
 
         if kind == StructKind::Tuple || kind == StructKind::TupleStruct {
             self.serialize_tuple_struct(shape, struct_)
@@ -1131,28 +1061,23 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         shape: &'static Shape,
         struct_: facet_reflect::PeekStruct<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
-        let fields: alloc::vec::Vec<_> =
-            self.collect_fields(struct_.fields_for_binary_serialize())?;
-        let is_transparent = shape.is_transparent() && fields.len() == 1;
-
-        if is_transparent {
-            let (field_item, field_value) = &fields[0];
+        let mut fields = struct_.fields_for_binary_serialize().peekable();
+        let first = fields.next();
+        if shape.is_transparent()
+            && let Some((field_item, field_value)) = &first
+            && fields.peek().is_none()
+        {
             self.serialize_field_value(field_item, *field_value)
         } else {
-            self.check_cancellation()?;
             self.serializer
                 .begin_seq()
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
-            for (idx, (field_item, field_value)) in fields.into_iter().enumerate() {
-                self.check_cancellation()?;
+            for (idx, (field_item, field_value)) in first.into_iter().chain(fields).enumerate() {
                 self.push(PathSegment::Index(idx));
                 self.serialize_field_value(&field_item, field_value)?;
                 self.pop();
             }
-            self.check_cancellation()?;
-            self.serializer.end_seq().map_err(SerializeError::Backend)?;
-            self.check_cancellation()
+            self.serializer.end_seq().map_err(SerializeError::Backend)
         }
     }
 
@@ -1162,22 +1087,17 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         struct_: facet_reflect::PeekStruct<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
         let field_mode = self.serializer.struct_field_mode();
-        self.check_cancellation()?;
         self.serializer
             .begin_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
 
-        let mut fields: alloc::vec::Vec<_> = if field_mode == StructFieldMode::Unnamed {
-            self.collect_fields(struct_.fields_for_binary_serialize())?
+        let fields = if field_mode == StructFieldMode::Unnamed {
+            struct_.fields_for_binary_serialize()
         } else {
-            self.collect_fields(struct_.fields_for_serialize())?
+            struct_.fields_for_serialize()
         };
 
-        sort_fields_if_needed(self.serializer, &mut fields);
-
         for (field_item, field_value) in fields {
-            self.check_cancellation()?;
             if self.serializer.should_omit_field(&field_item, field_value) {
                 continue;
             }
@@ -1188,11 +1108,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             }
         }
 
-        self.check_cancellation()?;
         self.serializer
             .end_struct()
-            .map_err(SerializeError::Backend)?;
-        self.check_cancellation()
+            .map_err(SerializeError::Backend)
     }
 
     #[inline(never)]
@@ -1202,22 +1120,18 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         field_item: facet_reflect::FieldItem,
         field_value: Peek<'mem, 'facet>,
     ) -> Result<(), SerializeError<S::Error>> {
-        self.check_cancellation()?;
         let key_written = self
             .serializer
             .field_metadata_with_value(&field_item, field_value)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         if !key_written {
             self.serializer
                 .field_metadata(&field_item)
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
             if field_mode == StructFieldMode::Named {
                 self.serializer
                     .field_key(field_item.effective_name())
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
             }
         }
         self.push(PathSegment::Field(Cow::Owned(
@@ -1243,25 +1157,20 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             let variant_name = field_item.effective_name();
 
             if field_mode == StructFieldMode::Named {
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(tag_key)
                     .map_err(SerializeError::Backend)?;
             }
-            self.check_cancellation()?;
             self.serializer
                 .scalar(ScalarValue::Str(Cow::Borrowed(variant_name)))
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
 
             if let Ok(inner_struct) = field_value.into_struct() {
                 for (inner_item, inner_value) in inner_struct.fields_for_serialize() {
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(inner_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         inner_item.effective_name().to_string(),
@@ -1271,12 +1180,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 }
             } else if let Ok(enum_peek) = field_value.into_enum() {
                 for (inner_item, inner_value) in enum_peek.fields_for_serialize() {
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(inner_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         inner_item.effective_name().to_string(),
@@ -1301,11 +1208,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         } && let Ok(enum_peek) = field_value.into_enum()
         {
             if field_mode == StructFieldMode::Named {
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(field_item.effective_name())
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
             }
 
             let variant = enum_peek
@@ -1316,11 +1221,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 field_item.effective_name().to_string(),
             )));
             if variant.data.kind == StructKind::Unit {
-                self.check_cancellation()?;
                 self.serializer
                     .serialize_none()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
             } else {
                 self.serialize_variant_after_tag(enum_peek, variant)?;
             }
@@ -1350,23 +1253,20 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
 
         // Case 1: plain struct — flatten its fields into the enclosing object
         if let Ok(struct_) = value.into_struct() {
-            let mut fields: alloc::vec::Vec<_> = if field_mode == StructFieldMode::Unnamed {
-                self.collect_fields(struct_.fields_for_binary_serialize())?
+            let fields = if field_mode == StructFieldMode::Unnamed {
+                struct_.fields_for_binary_serialize()
             } else {
-                self.collect_fields(struct_.fields_for_serialize())?
+                struct_.fields_for_serialize()
             };
-            sort_fields_if_needed(self.serializer, &mut fields);
+
             for (field_item, field_value) in fields {
-                self.check_cancellation()?;
                 self.serializer
                     .field_metadata(&field_item)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 if field_mode == StructFieldMode::Named {
                     self.serializer
                         .field_key(field_item.effective_name())
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
                 self.push(PathSegment::Field(Cow::Owned(
                     field_item.effective_name().to_string(),
@@ -1402,17 +1302,14 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 .map_err(|e| SerializeError::Unsupported(Cow::Owned(e.to_string())))?;
 
             // Write the inner enum's tag
-            self.check_cancellation()?;
             self.serializer
                 .field_key(inner_tag)
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
             self.serializer
                 .scalar(ScalarValue::Str(Cow::Borrowed(
                     inner_variant.effective_name(),
                 )))
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
 
             self.push(PathSegment::Variant(Cow::Borrowed(
                 inner_variant.effective_name(),
@@ -1421,25 +1318,20 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             match inner_variant.data.kind {
                 StructKind::Unit => {}
                 StructKind::Struct => {
-                    let mut inner_fields: alloc::vec::Vec<_> =
-                        if field_mode == StructFieldMode::Unnamed {
-                            self.collect_fields(inner_enum.fields_for_binary_serialize())?
-                        } else {
-                            self.collect_fields(inner_enum.fields_for_serialize())?
-                        };
-                    sort_fields_if_needed(self.serializer, &mut inner_fields);
+                    let inner_fields = if field_mode == StructFieldMode::Unnamed {
+                        inner_enum.fields_for_binary_serialize()
+                    } else {
+                        inner_enum.fields_for_serialize()
+                    };
 
                     for (field_item, field_value) in inner_fields {
-                        self.check_cancellation()?;
                         self.serializer
                             .field_metadata(&field_item)
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                         if field_mode == StructFieldMode::Named {
                             self.serializer
                                 .field_key(field_item.effective_name())
                                 .map_err(SerializeError::Backend)?;
-                            self.check_cancellation()?;
                         }
                         self.push(PathSegment::Field(Cow::Owned(
                             field_item.effective_name().to_string(),
@@ -1492,24 +1384,18 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             | facet_core::EnumRepr::U16
             | facet_core::EnumRepr::U32
             | facet_core::EnumRepr::U64
-            | facet_core::EnumRepr::USize => {
-                self.check_cancellation()?;
-                self.serializer
-                    .scalar(ScalarValue::U64(enum_.discriminant() as u64))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
-            }
+            | facet_core::EnumRepr::USize => self
+                .serializer
+                .scalar(ScalarValue::U64(enum_.discriminant() as u64))
+                .map_err(SerializeError::Backend),
             facet_core::EnumRepr::I8
             | facet_core::EnumRepr::I16
             | facet_core::EnumRepr::I32
             | facet_core::EnumRepr::I64
-            | facet_core::EnumRepr::ISize => {
-                self.check_cancellation()?;
-                self.serializer
-                    .scalar(ScalarValue::I64(enum_.discriminant()))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
-            }
+            | facet_core::EnumRepr::ISize => self
+                .serializer
+                .scalar(ScalarValue::I64(enum_.discriminant()))
+                .map_err(SerializeError::Backend),
         }
     }
 
@@ -1522,11 +1408,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             SerializeError::Unsupported(Cow::Borrowed("opaque enum layout is unsupported"))
         })?;
 
-        self.check_cancellation()?;
         self.serializer
             .variant_metadata(variant)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
 
         // Cow-like enums serialize transparently
         if shape.is_cow() {
@@ -1545,11 +1429,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
             let variant_index = enum_.variant_index().map_err(|_| {
                 SerializeError::Unsupported(Cow::Borrowed("opaque enum layout is unsupported"))
             })?;
-            self.check_cancellation()?;
             self.serializer
                 .begin_enum_variant(variant_index, variant.name)
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
 
             self.push(PathSegment::Variant(Cow::Borrowed(variant.name)));
             let result = match variant.data.kind {
@@ -1558,7 +1440,6 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     for (idx, (field_item, field_value)) in
                         enum_.fields_for_binary_serialize().enumerate()
                     {
-                        self.check_cancellation()?;
                         self.push(PathSegment::Index(idx));
                         self.serialize_field_value(&field_item, field_value)?;
                         self.pop();
@@ -1591,14 +1472,7 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         // When a tag field is present, the captured tag value should be serialized via
         // serialize_externally_tagged_enum, which knows how to extract and use that value.
         if variant.is_other() {
-            let mut has_tag_field = false;
-            for field in variant.data.fields {
-                self.check_cancellation()?;
-                if field.is_variant_tag() {
-                    has_tag_field = true;
-                    break;
-                }
-            }
+            let has_tag_field = variant.data.fields.iter().any(|f| f.is_variant_tag());
             if !has_tag_field {
                 self.push(PathSegment::Variant(Cow::Borrowed(
                     variant.effective_name(),
@@ -1612,24 +1486,19 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         match (tag, content) {
             (Some(tag_key), None) => {
                 // Internally tagged
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(tag_key)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
 
                 if numeric {
                     self.serialize_discriminant(enum_)?;
                 } else {
-                    self.check_cancellation()?;
                     self.serializer
                         .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
 
                 self.push(PathSegment::Variant(Cow::Borrowed(
@@ -1639,24 +1508,20 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 match variant.data.kind {
                     StructKind::Unit => {}
                     StructKind::Struct => {
-                        let mut fields: alloc::vec::Vec<_> =
-                            if field_mode == StructFieldMode::Unnamed {
-                                self.collect_fields(enum_.fields_for_binary_serialize())?
-                            } else {
-                                self.collect_fields(enum_.fields_for_serialize())?
-                            };
-                        sort_fields_if_needed(self.serializer, &mut fields);
+                        let fields = if field_mode == StructFieldMode::Unnamed {
+                            enum_.fields_for_binary_serialize()
+                        } else {
+                            enum_.fields_for_serialize()
+                        };
+
                         for (field_item, field_value) in fields {
-                            self.check_cancellation()?;
                             self.serializer
                                 .field_metadata(&field_item)
                                 .map_err(SerializeError::Backend)?;
-                            self.check_cancellation()?;
                             if field_mode == StructFieldMode::Named {
                                 self.serializer
                                     .field_key(field_item.effective_name())
                                     .map_err(SerializeError::Backend)?;
-                                self.check_cancellation()?;
                             }
                             self.push(PathSegment::Field(Cow::Owned(
                                 field_item.effective_name().to_string(),
@@ -1687,11 +1552,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 }
                 self.pop();
 
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 return Ok(());
             }
             (Some(tag_key), Some(content_key)) => {
@@ -1725,24 +1588,19 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         numeric: bool,
     ) -> Result<(), SerializeError<S::Error>> {
         let field_mode = self.serializer.struct_field_mode();
-        self.check_cancellation()?;
         self.serializer
             .begin_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         self.serializer
             .field_key(tag_key)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
 
         if numeric {
             self.serialize_discriminant(enum_)?;
         } else {
-            self.check_cancellation()?;
             self.serializer
                 .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
                 .map_err(SerializeError::Backend)?;
-            self.check_cancellation()?;
         }
 
         self.push(PathSegment::Variant(Cow::Borrowed(
@@ -1752,32 +1610,26 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         match variant.data.kind {
             StructKind::Unit => {}
             StructKind::Struct => {
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(content_key)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
-                let mut fields: alloc::vec::Vec<_> = if field_mode == StructFieldMode::Unnamed {
-                    self.collect_fields(enum_.fields_for_binary_serialize())?
+                let fields = if field_mode == StructFieldMode::Unnamed {
+                    enum_.fields_for_binary_serialize()
                 } else {
-                    self.collect_fields(enum_.fields_for_serialize())?
+                    enum_.fields_for_serialize()
                 };
-                sort_fields_if_needed(self.serializer, &mut fields);
+
                 for (field_item, field_value) in fields {
-                    self.check_cancellation()?;
                     self.serializer
                         .field_metadata(&field_item)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(field_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         field_item.effective_name().to_string(),
@@ -1785,18 +1637,14 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     self.serialize_field_value(&field_item, field_value)?;
                     self.pop();
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
             }
             StructKind::TupleStruct | StructKind::Tuple => {
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(content_key)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
 
                 let field_count = variant.data.fields.len();
                 if field_count == 1 {
@@ -1811,13 +1659,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     let field_def = variant.data.fields.first().copied();
                     self.with_field_context(field_def, |this| this.serialize_impl(inner))?;
                 } else {
-                    self.check_cancellation()?;
                     self.serializer
                         .begin_seq()
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     for idx in 0..field_count {
-                        self.check_cancellation()?;
                         let inner = enum_
                             .field(idx)
                             .map_err(|_| {
@@ -1833,19 +1678,15 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         self.with_field_context(field_def, |this| this.serialize_impl(inner))?;
                         self.pop();
                     }
-                    self.check_cancellation()?;
                     self.serializer.end_seq().map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
             }
         }
 
         self.pop();
-        self.check_cancellation()?;
         self.serializer
             .end_struct()
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
         Ok(())
     }
 
@@ -1854,45 +1695,13 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         enum_: facet_reflect::PeekEnum<'mem, 'facet>,
         variant: &'static facet_core::Variant,
     ) -> Result<(), SerializeError<S::Error>> {
-        let field_mode = self.serializer.struct_field_mode();
-
-        // For #[facet(other)] variants with a #[facet(metadata = "tag")] field,
-        // use the field's value as the tag name
-        let tag_name: Cow<'_, str> = if variant.is_other() {
-            let mut tag_value: Option<Cow<'_, str>> = None;
-            let fields_iter: alloc::boxed::Box<
-                dyn Iterator<Item = (facet_reflect::FieldItem, facet_reflect::Peek<'_, '_>)>,
-            > = if field_mode == StructFieldMode::Unnamed {
-                alloc::boxed::Box::new(enum_.fields_for_binary_serialize())
-            } else {
-                alloc::boxed::Box::new(enum_.fields_for_serialize())
-            };
-            for (field_item, field_value) in fields_iter {
-                self.check_cancellation()?;
-                if let Some(field) = field_item.field
-                    && field.is_variant_tag()
-                {
-                    if let Ok(opt) = field_value.into_option()
-                        && let Some(inner) = opt.value()
-                        && let Some(s) = inner.as_str()
-                    {
-                        tag_value = Some(Cow::Borrowed(s));
-                    }
-                    break;
-                }
-            }
-            tag_value.unwrap_or_else(|| Cow::Borrowed(variant.effective_name()))
-        } else {
-            Cow::Borrowed(variant.effective_name())
-        };
+        let tag_name = self.externally_tagged_variant_name(enum_, variant);
 
         // Check if the format wants to handle this with tag syntax
-        self.check_cancellation()?;
         let use_tag_syntax = self
             .serializer
             .write_variant_tag(&tag_name)
             .map_err(SerializeError::Backend)?;
-        self.check_cancellation()?;
 
         self.push(PathSegment::Variant(Cow::Owned(tag_name.to_string())));
 
@@ -1906,6 +1715,45 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         result
     }
 
+    #[allow(
+        unsafe_code,
+        reason = "reflection pairs each field with a valid peek of that field's declared type"
+    )]
+    fn externally_tagged_variant_name<'mem, 'facet>(
+        &self,
+        enum_: facet_reflect::PeekEnum<'mem, 'facet>,
+        variant: &'static facet_core::Variant,
+    ) -> Cow<'mem, str> {
+        if variant.is_other() {
+            // Inspect schema fields directly: expanding a flattened map here
+            // would visit every key before the backend can write the tag.
+            for (field, value) in enum_.fields() {
+                if !field.is_variant_tag() {
+                    continue;
+                }
+                let skip = if self.serializer.struct_field_mode() == StructFieldMode::Unnamed {
+                    field.should_skip_serializing_unconditional()
+                } else {
+                    // SAFETY: FieldIter obtains this peek using this same field
+                    // from the active enum variant, so its pointer has the type
+                    // required by the field's skip predicate.
+                    unsafe { field.should_skip_serializing(value.data()) }
+                };
+                if skip {
+                    continue;
+                }
+                if let Ok(option) = value.into_option()
+                    && let Some(inner) = option.value()
+                    && let Some(tag) = inner.as_str()
+                {
+                    return Cow::Borrowed(tag);
+                }
+                break;
+            }
+        }
+        Cow::Borrowed(variant.effective_name())
+    }
+
     fn serialize_variant_after_tag<'mem, 'facet>(
         &mut self,
         enum_: facet_reflect::PeekEnum<'mem, 'facet>,
@@ -1915,11 +1763,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
 
         match variant.data.kind {
             StructKind::Unit => {
-                self.check_cancellation()?;
                 self.serializer
                     .finish_variant_tag_unit_payload()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
             StructKind::TupleStruct | StructKind::Tuple => {
@@ -1946,13 +1792,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         })?;
                     }
                 } else {
-                    self.check_cancellation()?;
                     self.serializer
                         .begin_seq_after_tag()
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     for idx in 0..field_count {
-                        self.check_cancellation()?;
                         let inner = enum_
                             .field(idx)
                             .map_err(|_| {
@@ -1979,9 +1822,7 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         }
                         self.pop();
                     }
-                    self.check_cancellation()?;
                     self.serializer.end_seq().map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
                 Ok(())
             }
@@ -1994,45 +1835,38 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                 } else {
                     alloc::boxed::Box::new(enum_.fields_for_serialize())
                 };
-                let mut fields = alloc::vec::Vec::new();
-                for (field_item, field_value) in fields_iter {
-                    self.check_cancellation()?;
-                    if is_other
-                        && field_item.field.is_some_and(|field| {
-                            field.metadata_kind().is_some() || field.is_variant_tag()
-                        })
-                    {
-                        continue;
-                    }
-                    fields.push((field_item, field_value));
-                }
+                let mut fields = fields_iter
+                    .filter(|(field_item, _)| {
+                        if is_other {
+                            field_item
+                                .field
+                                .map(|f| f.metadata_kind().is_none() && !f.is_variant_tag())
+                                .unwrap_or(true)
+                        } else {
+                            true
+                        }
+                    })
+                    .peekable();
 
-                if fields.is_empty() {
-                    self.check_cancellation()?;
+                if fields.peek().is_none() {
                     self.serializer
                         .finish_variant_tag_unit_payload()
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     return Ok(());
                 }
 
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct_after_tag()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
-                sort_fields_if_needed(self.serializer, &mut fields);
+
                 for (field_item, field_value) in fields {
-                    self.check_cancellation()?;
                     self.serializer
                         .field_metadata(&field_item)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(field_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         field_item.effective_name().to_string(),
@@ -2040,11 +1874,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     self.serialize_field_value(&field_item, field_value)?;
                     self.pop();
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
         }
@@ -2059,23 +1891,18 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
 
         match variant.data.kind {
             StructKind::Unit => {
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
             StructKind::TupleStruct | StructKind::Tuple => {
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(variant.effective_name())
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
 
                 let field_count = variant.data.fields.len();
                 if field_count == 1 {
@@ -2100,13 +1927,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         })?;
                     }
                 } else {
-                    self.check_cancellation()?;
                     self.serializer
                         .begin_seq()
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     for idx in 0..field_count {
-                        self.check_cancellation()?;
                         let inner = enum_
                             .field(idx)
                             .map_err(|_| {
@@ -2133,48 +1957,39 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         }
                         self.pop();
                     }
-                    self.check_cancellation()?;
                     self.serializer.end_seq().map_err(SerializeError::Backend)?;
                 }
 
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
             StructKind::Struct => {
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 self.serializer
                     .field_key(variant.effective_name())
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
+
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
-                let mut fields: alloc::vec::Vec<_> = if field_mode == StructFieldMode::Unnamed {
-                    self.collect_fields(enum_.fields_for_binary_serialize())?
+                let fields = if field_mode == StructFieldMode::Unnamed {
+                    enum_.fields_for_binary_serialize()
                 } else {
-                    self.collect_fields(enum_.fields_for_serialize())?
+                    enum_.fields_for_serialize()
                 };
-                sort_fields_if_needed(self.serializer, &mut fields);
+
                 for (field_item, field_value) in fields {
-                    self.check_cancellation()?;
                     self.serializer
                         .field_metadata(&field_item)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(field_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         field_item.effective_name().to_string(),
@@ -2182,15 +1997,13 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     self.serialize_field_value(&field_item, field_value)?;
                     self.pop();
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
+
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
         }
@@ -2204,13 +2017,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         let field_mode = self.serializer.struct_field_mode();
 
         match variant.data.kind {
-            StructKind::Unit => {
-                self.check_cancellation()?;
-                self.serializer
-                    .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
-            }
+            StructKind::Unit => self
+                .serializer
+                .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
+                .map_err(SerializeError::Backend),
             StructKind::TupleStruct | StructKind::Tuple => {
                 let field_count = variant.data.fields.len();
                 if field_count == 1 {
@@ -2225,13 +2035,10 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     let field_def = variant.data.fields.first().copied();
                     self.with_field_context(field_def, |this| this.serialize_impl(inner))
                 } else {
-                    self.check_cancellation()?;
                     self.serializer
                         .begin_seq()
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     for idx in 0..field_count {
-                        self.check_cancellation()?;
                         let inner = enum_
                             .field(idx)
                             .map_err(|_| {
@@ -2247,35 +2054,28 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                         self.with_field_context(field_def, |this| this.serialize_impl(inner))?;
                         self.pop();
                     }
-                    self.check_cancellation()?;
                     self.serializer.end_seq().map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     Ok(())
                 }
             }
             StructKind::Struct => {
-                self.check_cancellation()?;
                 self.serializer
                     .begin_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
-                let mut fields: alloc::vec::Vec<_> = if field_mode == StructFieldMode::Unnamed {
-                    self.collect_fields(enum_.fields_for_binary_serialize())?
+                let fields = if field_mode == StructFieldMode::Unnamed {
+                    enum_.fields_for_binary_serialize()
                 } else {
-                    self.collect_fields(enum_.fields_for_serialize())?
+                    enum_.fields_for_serialize()
                 };
-                sort_fields_if_needed(self.serializer, &mut fields);
+
                 for (field_item, field_value) in fields {
-                    self.check_cancellation()?;
                     self.serializer
                         .field_metadata(&field_item)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                     if field_mode == StructFieldMode::Named {
                         self.serializer
                             .field_key(field_item.effective_name())
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                     }
                     self.push(PathSegment::Field(Cow::Owned(
                         field_item.effective_name().to_string(),
@@ -2283,11 +2083,9 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     self.serialize_field_value(&field_item, field_value)?;
                     self.pop();
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .end_struct()
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 Ok(())
             }
         }
@@ -2302,70 +2100,55 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         match dynamic.kind() {
             DynValueKind::Null => {
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::Null)
                         .map_err(SerializeError::Backend)?;
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Null)
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                    .map_err(SerializeError::Backend)
             }
             DynValueKind::Bool => {
                 let value = dynamic.as_bool().ok_or_else(|| {
                     SerializeError::Internal(Cow::Borrowed("dynamic bool missing value"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::Bool)
                         .map_err(SerializeError::Backend)?;
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Bool(value))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                    .map_err(SerializeError::Backend)
             }
             DynValueKind::Number => {
                 if let Some(n) = dynamic.as_i64() {
                     if tagged {
-                        self.check_cancellation()?;
                         self.serializer
                             .dynamic_value_tag(DynamicValueTag::I64)
                             .map_err(SerializeError::Backend)?;
                     }
-                    self.check_cancellation()?;
                     self.serializer
                         .scalar(ScalarValue::I64(n))
-                        .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()
+                        .map_err(SerializeError::Backend)
                 } else if let Some(n) = dynamic.as_u64() {
                     if tagged {
-                        self.check_cancellation()?;
                         self.serializer
                             .dynamic_value_tag(DynamicValueTag::U64)
                             .map_err(SerializeError::Backend)?;
                     }
-                    self.check_cancellation()?;
                     self.serializer
                         .scalar(ScalarValue::U64(n))
-                        .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()
+                        .map_err(SerializeError::Backend)
                 } else if let Some(n) = dynamic.as_f64() {
                     if tagged {
-                        self.check_cancellation()?;
                         self.serializer
                             .dynamic_value_tag(DynamicValueTag::F64)
                             .map_err(SerializeError::Backend)?;
                     }
-                    self.check_cancellation()?;
                     self.serializer
                         .scalar(ScalarValue::F64(n))
-                        .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()
+                        .map_err(SerializeError::Backend)
                 } else {
                     Err(SerializeError::Unsupported(Cow::Borrowed(
                         "dynamic number not representable",
@@ -2377,117 +2160,91 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     SerializeError::Internal(Cow::Borrowed("dynamic string missing value"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::String)
                         .map_err(SerializeError::Backend)?;
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Str(Cow::Borrowed(value)))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                    .map_err(SerializeError::Backend)
             }
             DynValueKind::Bytes => {
                 let value = dynamic.as_bytes().ok_or_else(|| {
                     SerializeError::Internal(Cow::Borrowed("dynamic bytes missing value"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::Bytes)
                         .map_err(SerializeError::Backend)?;
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Bytes(Cow::Borrowed(value)))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                    .map_err(SerializeError::Backend)
             }
             DynValueKind::Array => {
                 let len = dynamic.array_len().ok_or_else(|| {
                     SerializeError::Internal(Cow::Borrowed("dynamic array missing length"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::Array)
                         .map_err(SerializeError::Backend)?;
                 }
-                self.check_cancellation()?;
                 self.serializer
                     .begin_seq_with_len(len)
                     .map_err(SerializeError::Backend)?;
-                self.check_cancellation()?;
                 if let Some(iter) = dynamic.array_iter() {
                     for (idx, item) in iter.enumerate() {
-                        self.check_cancellation()?;
                         self.push(PathSegment::Index(idx));
                         self.serialize_impl(item)?;
                         self.pop();
                     }
                 }
-                self.check_cancellation()?;
-                self.serializer.end_seq().map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                self.serializer.end_seq().map_err(SerializeError::Backend)
             }
             DynValueKind::Object => {
                 let len = dynamic.object_len().ok_or_else(|| {
                     SerializeError::Internal(Cow::Borrowed("dynamic object missing length"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::Object)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
                 match self.serializer.map_encoding() {
                     MapEncoding::Pairs => {
-                        self.check_cancellation()?;
                         self.serializer
                             .begin_map_with_len(len)
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                         if let Some(iter) = dynamic.object_iter() {
                             for (key, value) in iter {
-                                self.check_cancellation()?;
                                 self.serializer
                                     .scalar(ScalarValue::Str(Cow::Borrowed(key)))
                                     .map_err(SerializeError::Backend)?;
-                                self.check_cancellation()?;
                                 self.push(PathSegment::Field(Cow::Owned(key.to_string())));
                                 self.serialize_impl(value)?;
                                 self.pop();
                             }
                         }
-                        self.check_cancellation()?;
-                        self.serializer.end_map().map_err(SerializeError::Backend)?;
-                        self.check_cancellation()
+                        self.serializer.end_map().map_err(SerializeError::Backend)
                     }
                     MapEncoding::Struct => {
-                        self.check_cancellation()?;
                         self.serializer
                             .begin_struct()
                             .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()?;
                         if let Some(iter) = dynamic.object_iter() {
                             for (key, value) in iter {
-                                self.check_cancellation()?;
                                 self.serializer
                                     .field_key(key)
                                     .map_err(SerializeError::Backend)?;
-                                self.check_cancellation()?;
                                 self.push(PathSegment::Field(Cow::Owned(key.to_string())));
                                 self.serialize_impl(value)?;
                                 self.pop();
                             }
                         }
-                        self.check_cancellation()?;
                         self.serializer
                             .end_struct()
-                            .map_err(SerializeError::Backend)?;
-                        self.check_cancellation()
+                            .map_err(SerializeError::Backend)
                     }
                 }
             }
@@ -2496,18 +2253,14 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
                     SerializeError::Internal(Cow::Borrowed("dynamic datetime missing value"))
                 })?;
                 if tagged {
-                    self.check_cancellation()?;
                     self.serializer
                         .dynamic_value_tag(DynamicValueTag::DateTime)
                         .map_err(SerializeError::Backend)?;
-                    self.check_cancellation()?;
                 }
                 let s = format_dyn_datetime(dt);
-                self.check_cancellation()?;
                 self.serializer
                     .scalar(ScalarValue::Str(Cow::Owned(s)))
-                    .map_err(SerializeError::Backend)?;
-                self.check_cancellation()
+                    .map_err(SerializeError::Backend)
             }
             DynValueKind::QName | DynValueKind::Uuid => Err(SerializeError::Unsupported(
                 Cow::Borrowed("dynamic QName/Uuid serialization is not supported"),
@@ -2524,55 +2277,17 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         value: Peek<'mem, 'facet>,
         proxy_def: &'static facet_core::ProxyDef,
     ) -> Result<(), SerializeError<S::Error>> {
-        self.check_cancellation()?;
         proxy_def.shape.layout.sized_layout().map_err(|_| {
             SerializeError::Unsupported(Cow::Borrowed("proxy type must be sized for serialization"))
         })?;
 
         // OwnedPeek releases the converted value and allocation even when a
-        // backend or cancellation predicate unwinds during traversal. The
-        // reflection boundary also owns deallocation after a failed conversion.
+        // backend fails or unwinds during traversal. The reflection boundary
+        // also owns deallocation after a failed conversion.
         let proxy = value
             .custom_serialization_with_proxy(proxy_def)
             .map_err(|error| SerializeError::Unsupported(Cow::Owned(error.to_string())))?;
         self.serialize_impl(proxy.as_peek())
-    }
-
-    fn deref_if_pointer<'mem, 'facet>(
-        &self,
-        mut value: Peek<'mem, 'facet>,
-    ) -> Result<Peek<'mem, 'facet>, SerializeError<S::Error>> {
-        loop {
-            self.check_cancellation()?;
-            if let Ok(pointer) = value.into_pointer()
-                && let Some(target) = pointer.borrow_inner()
-            {
-                value = target;
-            } else {
-                return Ok(value);
-            }
-        }
-    }
-
-    fn extract_string_from_peek<'mem, 'facet>(
-        &self,
-        value: Peek<'mem, 'facet>,
-    ) -> Result<Option<&'mem str>, SerializeError<S::Error>> {
-        self.check_cancellation()?;
-        if let Some(value) = value.as_str() {
-            return Ok(Some(value));
-        }
-        if value.shape().is_metadata_container()
-            && let Ok(container) = value.into_struct()
-        {
-            for (field, value) in container.fields() {
-                self.check_cancellation()?;
-                if !field.is_metadata() {
-                    return self.extract_string_from_peek(value);
-                }
-            }
-        }
-        Ok(None)
     }
 }
 
@@ -2607,44 +2322,6 @@ where
 {
     let mut ctx = SerializeContext::new(serializer);
     ctx.serialize(value)
-}
-
-fn check_cancellation<E: Debug>(
-    should_cancel: Option<&dyn Fn() -> bool>,
-) -> Result<(), SerializeError<E>> {
-    if should_cancel.is_some_and(|should_cancel| should_cancel()) {
-        Err(SerializeError::Cancelled)
-    } else {
-        Ok(())
-    }
-}
-
-/// Serialize a root value, stopping when a borrowed predicate returns `true`.
-///
-/// The predicate is checked between reflected values, fields, and backend calls.
-/// It may borrow non-thread-safe local state. This is cooperative cancellation:
-/// a long-running backend or user-provided formatter/proxy can only be stopped
-/// after its call returns unless it performs additional checks itself. A backend
-/// may have emitted a partial document when cancellation is returned; discard it.
-pub fn serialize_root_with_cancellation<'mem, 'facet, S>(
-    serializer: &mut S,
-    value: Peek<'mem, 'facet>,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<(), SerializeError<S::Error>>
-where
-    S: FormatSerializer,
-{
-    SerializeContext::with_cancellation(serializer, should_cancel).serialize(value)
-}
-
-/// Helper to sort fields according to format preference (currently a no-op).
-fn sort_fields_if_needed<'mem, 'facet, S>(
-    _serializer: &S,
-    _fields: &mut alloc::vec::Vec<(facet_reflect::FieldItem, Peek<'mem, 'facet>)>,
-) where
-    S: FormatSerializer,
-{
-    // Currently only Declaration order is supported, which preserves the original order.
 }
 
 fn format_dyn_datetime(
@@ -2730,6 +2407,16 @@ where
         .map_err(SerializeError::Backend)
 }
 
+/// Dereference a pointer/reference (Box, Arc, etc.) to get the underlying value
+fn deref_if_pointer<'mem, 'facet>(peek: Peek<'mem, 'facet>) -> Peek<'mem, 'facet> {
+    if let Ok(ptr) = peek.into_pointer()
+        && let Some(target) = ptr.borrow_inner()
+    {
+        return deref_if_pointer(target);
+    }
+    peek
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shape-guided serialization of dynamic values
 // ─────────────────────────────────────────────────────────────────────────────
@@ -2769,34 +2456,7 @@ where
         ))
     })?;
 
-    serialize_dynamic_with_shape(serializer, dynamic, target_shape, value.shape(), None)
-}
-
-/// Serialize a dynamic value with a target shape and a borrowed cancellation predicate.
-///
-/// Cancellation and partial-output behavior match [`serialize_root_with_cancellation`].
-pub fn serialize_value_with_shape_with_cancellation<S>(
-    serializer: &mut S,
-    value: Peek<'_, '_>,
-    target_shape: &'static Shape,
-    should_cancel: &dyn Fn() -> bool,
-) -> Result<(), SerializeError<S::Error>>
-where
-    S: FormatSerializer,
-{
-    check_cancellation(Some(should_cancel))?;
-    let dynamic = value.into_dynamic_value().map_err(|_| {
-        SerializeError::Unsupported(Cow::Borrowed(
-            "serialize_value_with_shape requires a DynamicValue type",
-        ))
-    })?;
-    serialize_dynamic_with_shape(
-        serializer,
-        dynamic,
-        target_shape,
-        value.shape(),
-        Some(should_cancel),
-    )
+    serialize_dynamic_with_shape(serializer, dynamic, target_shape, value.shape())
 }
 
 fn serialize_dynamic_with_shape<S>(
@@ -2804,25 +2464,17 @@ fn serialize_dynamic_with_shape<S>(
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     target_shape: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
 {
-    check_cancellation(should_cancel)?;
     use facet_core::{ListDef, OptionDef, ScalarType as CoreScalarType, Type, UserType};
 
     // Handle smart pointers - unwrap to the inner shape
     if let Def::Pointer(ptr_def) = target_shape.def
         && let Some(pointee) = ptr_def.pointee
     {
-        return serialize_dynamic_with_shape(
-            serializer,
-            dynamic,
-            pointee,
-            value_shape,
-            should_cancel,
-        );
+        return serialize_dynamic_with_shape(serializer, dynamic, pointee, value_shape);
     }
 
     // Handle transparent wrappers via .inner
@@ -2832,83 +2484,43 @@ where
             target_shape.def,
             Def::List(_) | Def::Map(_) | Def::Set(_) | Def::Array(_)
         ) {
-            return serialize_dynamic_with_shape(
-                serializer,
-                dynamic,
-                inner_shape,
-                value_shape,
-                should_cancel,
-            );
+            return serialize_dynamic_with_shape(serializer, dynamic, inner_shape, value_shape);
         }
     }
 
     // Handle Option<T>
     if let Def::Option(OptionDef { t: inner_shape, .. }) = target_shape.def {
-        return serialize_option_from_dynamic(
-            serializer,
-            dynamic,
-            inner_shape,
-            value_shape,
-            should_cancel,
-        );
+        return serialize_option_from_dynamic(serializer, dynamic, inner_shape, value_shape);
     }
 
     // Handle List/Vec
     if let Def::List(ListDef { t: item_shape, .. }) = target_shape.def {
-        return serialize_list_from_dynamic(
-            serializer,
-            dynamic,
-            item_shape,
-            value_shape,
-            should_cancel,
-        );
+        return serialize_list_from_dynamic(serializer, dynamic, item_shape, value_shape);
     }
 
     // Handle Array [T; N]
     if let Def::Array(array_def) = target_shape.def {
-        return serialize_array_from_dynamic(
-            serializer,
-            dynamic,
-            array_def.t,
-            value_shape,
-            should_cancel,
-        );
+        return serialize_array_from_dynamic(serializer, dynamic, array_def.t, value_shape);
     }
 
     // Handle Map
     if let Def::Map(map_def) = target_shape.def {
-        return serialize_map_from_dynamic(
-            serializer,
-            dynamic,
-            map_def.k,
-            map_def.v,
-            value_shape,
-            should_cancel,
-        );
+        return serialize_map_from_dynamic(serializer, dynamic, map_def.k, map_def.v, value_shape);
     }
 
     // Handle scalars
     if let Some(scalar_type) = CoreScalarType::try_from_shape(target_shape) {
-        return serialize_scalar_from_dynamic(serializer, dynamic, scalar_type, should_cancel);
+        return serialize_scalar_from_dynamic(serializer, dynamic, scalar_type);
     }
 
     // Handle structs and enums by Type
     match target_shape.ty {
-        Type::User(UserType::Struct(struct_def)) => serialize_struct_from_dynamic(
-            serializer,
-            dynamic,
-            struct_def,
-            value_shape,
-            should_cancel,
-        ),
-        Type::User(UserType::Enum(enum_def)) => serialize_enum_from_dynamic(
-            serializer,
-            dynamic,
-            enum_def,
-            target_shape,
-            value_shape,
-            should_cancel,
-        ),
+        Type::User(UserType::Struct(struct_def)) => {
+            serialize_struct_from_dynamic(serializer, dynamic, struct_def, value_shape)
+        }
+        Type::User(UserType::Enum(enum_def)) => {
+            serialize_enum_from_dynamic(serializer, dynamic, enum_def, target_shape, value_shape)
+        }
         _ => Err(SerializeError::Unsupported(Cow::Owned(alloc::format!(
             "unsupported target shape for serialize_value_with_shape: {}",
             target_shape
@@ -2921,24 +2533,17 @@ fn serialize_option_from_dynamic<S>(
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     inner_shape: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
 {
     if dynamic.kind() == DynValueKind::Null {
-        check_cancellation(should_cancel)?;
-        serializer
-            .serialize_none()
-            .map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)
+        serializer.serialize_none().map_err(SerializeError::Backend)
     } else {
-        check_cancellation(should_cancel)?;
         serializer
             .begin_option_some()
             .map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)?;
-        serialize_dynamic_with_shape(serializer, dynamic, inner_shape, value_shape, should_cancel)
+        serialize_dynamic_with_shape(serializer, dynamic, inner_shape, value_shape)
     }
 }
 
@@ -2947,7 +2552,6 @@ fn serialize_list_from_dynamic<S>(
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     item_shape: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
@@ -2958,31 +2562,20 @@ where
         ))
     })?;
 
-    check_cancellation(should_cancel)?;
     serializer
         .begin_seq_with_len(len)
         .map_err(SerializeError::Backend)?;
-    check_cancellation(should_cancel)?;
 
     if let Some(iter) = dynamic.array_iter() {
         for elem in iter {
-            check_cancellation(should_cancel)?;
             let elem_dyn = elem.into_dynamic_value().map_err(|_| {
                 SerializeError::Internal(Cow::Borrowed("array element is not a dynamic value"))
             })?;
-            serialize_dynamic_with_shape(
-                serializer,
-                elem_dyn,
-                item_shape,
-                value_shape,
-                should_cancel,
-            )?;
+            serialize_dynamic_with_shape(serializer, elem_dyn, item_shape, value_shape)?;
         }
     }
 
-    check_cancellation(should_cancel)?;
-    serializer.end_seq().map_err(SerializeError::Backend)?;
-    check_cancellation(should_cancel)
+    serializer.end_seq().map_err(SerializeError::Backend)
 }
 
 fn serialize_array_from_dynamic<S>(
@@ -2990,35 +2583,23 @@ fn serialize_array_from_dynamic<S>(
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     item_shape: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
 {
     // Arrays don't have length prefix in postcard
-    check_cancellation(should_cancel)?;
     serializer.begin_seq().map_err(SerializeError::Backend)?;
-    check_cancellation(should_cancel)?;
 
     if let Some(iter) = dynamic.array_iter() {
         for elem in iter {
-            check_cancellation(should_cancel)?;
             let elem_dyn = elem.into_dynamic_value().map_err(|_| {
                 SerializeError::Internal(Cow::Borrowed("array element is not a dynamic value"))
             })?;
-            serialize_dynamic_with_shape(
-                serializer,
-                elem_dyn,
-                item_shape,
-                value_shape,
-                should_cancel,
-            )?;
+            serialize_dynamic_with_shape(serializer, elem_dyn, item_shape, value_shape)?;
         }
     }
 
-    check_cancellation(should_cancel)?;
-    serializer.end_seq().map_err(SerializeError::Backend)?;
-    check_cancellation(should_cancel)
+    serializer.end_seq().map_err(SerializeError::Backend)
 }
 
 fn serialize_map_from_dynamic<S>(
@@ -3027,7 +2608,6 @@ fn serialize_map_from_dynamic<S>(
     key_shape: &'static Shape,
     value_shape_inner: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
@@ -3038,17 +2618,14 @@ where
 
     match serializer.map_encoding() {
         MapEncoding::Pairs => {
-            check_cancellation(should_cancel)?;
             serializer
                 .begin_map_with_len(len)
                 .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)?;
 
             if let Some(iter) = dynamic.object_iter() {
                 for (key, val) in iter {
-                    check_cancellation(should_cancel)?;
                     // Serialize key according to key_shape
-                    serialize_string_as_scalar(serializer, key, key_shape, should_cancel)?;
+                    serialize_string_as_scalar(serializer, key, key_shape)?;
                     // Serialize value
                     let val_dyn = val.into_dynamic_value().map_err(|_| {
                         SerializeError::Internal(Cow::Borrowed(
@@ -3060,25 +2637,18 @@ where
                         val_dyn,
                         value_shape_inner,
                         value_shape,
-                        should_cancel,
                     )?;
                 }
             }
 
-            check_cancellation(should_cancel)?;
-            serializer.end_map().map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+            serializer.end_map().map_err(SerializeError::Backend)
         }
         MapEncoding::Struct => {
-            check_cancellation(should_cancel)?;
             serializer.begin_struct().map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)?;
 
             if let Some(iter) = dynamic.object_iter() {
                 for (key, val) in iter {
-                    check_cancellation(should_cancel)?;
                     serializer.field_key(key).map_err(SerializeError::Backend)?;
-                    check_cancellation(should_cancel)?;
                     let val_dyn = val.into_dynamic_value().map_err(|_| {
                         SerializeError::Internal(Cow::Borrowed(
                             "object value is not a dynamic value",
@@ -3089,14 +2659,11 @@ where
                         val_dyn,
                         value_shape_inner,
                         value_shape,
-                        should_cancel,
                     )?;
                 }
             }
 
-            check_cancellation(should_cancel)?;
-            serializer.end_struct().map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+            serializer.end_struct().map_err(SerializeError::Backend)
         }
     }
 }
@@ -3105,25 +2672,21 @@ fn serialize_string_as_scalar<S>(
     serializer: &mut S,
     s: &str,
     _key_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
 {
     // For now, serialize string keys directly
     // TODO: Handle non-string key types if needed
-    check_cancellation(should_cancel)?;
     serializer
         .scalar(ScalarValue::Str(Cow::Borrowed(s)))
-        .map_err(SerializeError::Backend)?;
-    check_cancellation(should_cancel)
+        .map_err(SerializeError::Backend)
 }
 
 fn serialize_scalar_from_dynamic<S>(
     serializer: &mut S,
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     scalar_type: facet_core::ScalarType,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
@@ -3131,22 +2694,16 @@ where
     use facet_core::ScalarType as ST;
 
     match scalar_type {
-        ST::Unit => {
-            check_cancellation(should_cancel)?;
-            serializer
-                .scalar(ScalarValue::Null)
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
-        }
+        ST::Unit => serializer
+            .scalar(ScalarValue::Null)
+            .map_err(SerializeError::Backend),
         ST::Bool => {
             let v = dynamic
                 .as_bool()
                 .ok_or_else(|| SerializeError::Unsupported(Cow::Borrowed("expected bool value")))?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::Bool(v))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::Char => {
             let s = dynamic.as_str().ok_or_else(|| {
@@ -3155,71 +2712,57 @@ where
             let c = s.chars().next().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected non-empty string for char"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::Char(c))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::Str | ST::String | ST::CowStr => {
             let s = dynamic.as_str().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected string value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::Str(Cow::Borrowed(s)))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::U8 | ST::U16 | ST::U32 | ST::U64 | ST::USize => {
             let n = dynamic.as_u64().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected unsigned integer value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::U64(n))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::U128 => {
             let n = dynamic.as_u64().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected unsigned integer value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::U128(n as u128))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::I8 | ST::I16 | ST::I32 | ST::I64 | ST::ISize => {
             let n = dynamic.as_i64().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected signed integer value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::I64(n))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::I128 => {
             let n = dynamic.as_i64().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected signed integer value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::I128(n as i128))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         ST::F32 | ST::F64 => {
             let n = dynamic.as_f64().ok_or_else(|| {
                 SerializeError::Unsupported(Cow::Borrowed("expected float value"))
             })?;
-            check_cancellation(should_cancel)?;
             serializer
                 .scalar(ScalarValue::F64(n))
-                .map_err(SerializeError::Backend)?;
-            check_cancellation(should_cancel)
+                .map_err(SerializeError::Backend)
         }
         _ => Err(SerializeError::Unsupported(Cow::Owned(alloc::format!(
             "unsupported scalar type: {:?}",
@@ -3233,7 +2776,6 @@ fn serialize_struct_from_dynamic<S>(
     dynamic: facet_reflect::PeekDynamicValue<'_, '_>,
     struct_def: facet_core::StructType,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
@@ -3242,41 +2784,27 @@ where
 
     if is_tuple {
         // For tuples, expect an array value
-        check_cancellation(should_cancel)?;
         serializer.begin_seq().map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)?;
 
         let iter = dynamic.array_iter().ok_or_else(|| {
             SerializeError::Unsupported(Cow::Borrowed("expected array value for tuple"))
         })?;
 
         for (field, elem) in struct_def.fields.iter().zip(iter) {
-            check_cancellation(should_cancel)?;
             let elem_dyn = elem.into_dynamic_value().map_err(|_| {
                 SerializeError::Internal(Cow::Borrowed("tuple element is not a dynamic value"))
             })?;
-            serialize_dynamic_with_shape(
-                serializer,
-                elem_dyn,
-                field.shape(),
-                value_shape,
-                should_cancel,
-            )?;
+            serialize_dynamic_with_shape(serializer, elem_dyn, field.shape(), value_shape)?;
         }
 
-        check_cancellation(should_cancel)?;
-        serializer.end_seq().map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)
+        serializer.end_seq().map_err(SerializeError::Backend)
     } else {
         // For named structs, expect an object value
         let field_mode = serializer.struct_field_mode();
 
-        check_cancellation(should_cancel)?;
         serializer.begin_struct().map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)?;
 
         for field in struct_def.fields {
-            check_cancellation(should_cancel)?;
             // Skip metadata fields
             if field.is_metadata() {
                 continue;
@@ -3291,43 +2819,19 @@ where
             })?;
 
             if field_mode == StructFieldMode::Named {
-                check_cancellation(should_cancel)?;
                 serializer
                     .field_key(field_name)
                     .map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)?;
             }
 
             let field_dyn = field_value.into_dynamic_value().map_err(|_| {
                 SerializeError::Internal(Cow::Borrowed("field value is not a dynamic value"))
             })?;
-            serialize_dynamic_with_shape(
-                serializer,
-                field_dyn,
-                field.shape(),
-                value_shape,
-                should_cancel,
-            )?;
+            serialize_dynamic_with_shape(serializer, field_dyn, field.shape(), value_shape)?;
         }
 
-        check_cancellation(should_cancel)?;
-        serializer.end_struct().map_err(SerializeError::Backend)?;
-        check_cancellation(should_cancel)
+        serializer.end_struct().map_err(SerializeError::Backend)
     }
-}
-
-fn find_variant_with_cancellation<E: Debug>(
-    enum_def: facet_core::EnumType,
-    should_cancel: Option<&dyn Fn() -> bool>,
-    matches: impl Fn(&facet_core::Variant) -> bool,
-) -> Result<Option<(usize, &'static facet_core::Variant)>, SerializeError<E>> {
-    for (index, variant) in enum_def.variants.iter().enumerate() {
-        check_cancellation(should_cancel)?;
-        if matches(variant) {
-            return Ok(Some((index, variant)));
-        }
-    }
-    Ok(None)
 }
 
 fn serialize_enum_from_dynamic<S>(
@@ -3336,7 +2840,6 @@ fn serialize_enum_from_dynamic<S>(
     enum_def: facet_core::EnumType,
     target_shape: &'static Shape,
     value_shape: &'static Shape,
-    should_cancel: Option<&dyn Fn() -> bool>,
 ) -> Result<(), SerializeError<S::Error>>
 where
     S: FormatSerializer,
@@ -3355,10 +2858,11 @@ where
                 SerializeError::Internal(Cow::Borrowed("expected string for unit variant"))
             })?;
 
-            let (variant_index, variant) =
-                find_variant_with_cancellation::<S::Error>(enum_def, should_cancel, |variant| {
-                    variant.effective_name() == variant_name
-                })?
+            let (variant_index, variant) = enum_def
+                .variants
+                .iter()
+                .enumerate()
+                .find(|(_, v)| v.effective_name() == variant_name)
                 .ok_or_else(|| {
                     SerializeError::Unsupported(Cow::Owned(alloc::format!(
                         "unknown variant '{}'",
@@ -3367,19 +2871,15 @@ where
                 })?;
 
             if use_index {
-                check_cancellation(should_cancel)?;
                 serializer
                     .begin_enum_variant(variant_index, variant.effective_name())
                     .map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)?;
                 // Unit variant has no payload
                 Ok(())
             } else {
-                check_cancellation(should_cancel)?;
                 serializer
                     .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
-                    .map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)
+                    .map_err(SerializeError::Backend)
             }
         }
 
@@ -3398,10 +2898,11 @@ where
                 SerializeError::Internal(Cow::Borrowed("expected object entry for enum variant"))
             })?;
 
-            let (variant_index, variant) =
-                find_variant_with_cancellation::<S::Error>(enum_def, should_cancel, |variant| {
-                    variant.effective_name() == variant_name
-                })?
+            let (variant_index, variant) = enum_def
+                .variants
+                .iter()
+                .enumerate()
+                .find(|(_, v)| v.effective_name() == variant_name)
                 .ok_or_else(|| {
                     SerializeError::Unsupported(Cow::Owned(alloc::format!(
                         "unknown variant '{}'",
@@ -3414,11 +2915,9 @@ where
             })?;
 
             if use_index {
-                check_cancellation(should_cancel)?;
                 serializer
                     .begin_enum_variant(variant_index, variant.effective_name())
                     .map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)?;
 
                 // Serialize payload based on variant kind
                 match variant.data.kind {
@@ -3433,7 +2932,6 @@ where
                                 payload_dyn,
                                 variant.data.fields[0].shape(),
                                 value_shape,
-                                should_cancel,
                             )?;
                         } else {
                             // Multi-field tuple variant - expect array
@@ -3444,7 +2942,6 @@ where
                             })?;
 
                             for (field, elem) in variant.data.fields.iter().zip(iter) {
-                                check_cancellation(should_cancel)?;
                                 let elem_dyn = elem.into_dynamic_value().map_err(|_| {
                                     SerializeError::Internal(Cow::Borrowed(
                                         "tuple element is not a dynamic value",
@@ -3455,7 +2952,6 @@ where
                                     elem_dyn,
                                     field.shape(),
                                     value_shape,
-                                    should_cancel,
                                 )?;
                             }
                         }
@@ -3463,7 +2959,6 @@ where
                     StructKind::Struct => {
                         // Struct variant - expect object
                         for field in variant.data.fields {
-                            check_cancellation(should_cancel)?;
                             let field_value =
                                 payload_dyn.object_get(field.name).ok_or_else(|| {
                                     SerializeError::Unsupported(Cow::Owned(alloc::format!(
@@ -3481,7 +2976,6 @@ where
                                 field_dyn,
                                 field.shape(),
                                 value_shape,
-                                should_cancel,
                             )?;
                         }
                     }
@@ -3490,22 +2984,16 @@ where
                 Ok(())
             } else {
                 // Externally tagged representation
-                check_cancellation(should_cancel)?;
                 serializer.begin_struct().map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)?;
-
                 serializer
                     .field_key(variant.effective_name())
                     .map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)?;
 
                 match variant.data.kind {
                     StructKind::Unit => {
-                        check_cancellation(should_cancel)?;
                         serializer
                             .scalar(ScalarValue::Null)
                             .map_err(SerializeError::Backend)?;
-                        check_cancellation(should_cancel)?;
                     }
                     StructKind::TupleStruct | StructKind::Tuple => {
                         if variant.data.fields.len() == 1 {
@@ -3514,19 +3002,15 @@ where
                                 payload_dyn,
                                 variant.data.fields[0].shape(),
                                 value_shape,
-                                should_cancel,
                             )?;
                         } else {
-                            check_cancellation(should_cancel)?;
                             serializer.begin_seq().map_err(SerializeError::Backend)?;
-                            check_cancellation(should_cancel)?;
                             let iter = payload_dyn.array_iter().ok_or_else(|| {
                                 SerializeError::Unsupported(Cow::Borrowed(
                                     "expected array for tuple variant",
                                 ))
                             })?;
                             for (field, elem) in variant.data.fields.iter().zip(iter) {
-                                check_cancellation(should_cancel)?;
                                 let elem_dyn = elem.into_dynamic_value().map_err(|_| {
                                     SerializeError::Internal(Cow::Borrowed(
                                         "element is not a dynamic value",
@@ -3537,20 +3021,14 @@ where
                                     elem_dyn,
                                     field.shape(),
                                     value_shape,
-                                    should_cancel,
                                 )?;
                             }
-                            check_cancellation(should_cancel)?;
                             serializer.end_seq().map_err(SerializeError::Backend)?;
-                            check_cancellation(should_cancel)?;
                         }
                     }
                     StructKind::Struct => {
-                        check_cancellation(should_cancel)?;
                         serializer.begin_struct().map_err(SerializeError::Backend)?;
-                        check_cancellation(should_cancel)?;
                         for field in variant.data.fields {
-                            check_cancellation(should_cancel)?;
                             let field_value =
                                 payload_dyn.object_get(field.name).ok_or_else(|| {
                                     SerializeError::Unsupported(Cow::Owned(alloc::format!(
@@ -3558,11 +3036,9 @@ where
                                         field.name
                                     )))
                                 })?;
-                            check_cancellation(should_cancel)?;
                             serializer
                                 .field_key(field.name)
                                 .map_err(SerializeError::Backend)?;
-                            check_cancellation(should_cancel)?;
                             let field_dyn = field_value.into_dynamic_value().map_err(|_| {
                                 SerializeError::Internal(Cow::Borrowed(
                                     "field is not a dynamic value",
@@ -3573,17 +3049,13 @@ where
                                 field_dyn,
                                 field.shape(),
                                 value_shape,
-                                should_cancel,
                             )?;
                         }
-                        check_cancellation(should_cancel)?;
                         serializer.end_struct().map_err(SerializeError::Backend)?;
                     }
                 }
 
-                check_cancellation(should_cancel)?;
-                serializer.end_struct().map_err(SerializeError::Backend)?;
-                check_cancellation(should_cancel)
+                serializer.end_struct().map_err(SerializeError::Backend)
             }
         }
 
@@ -3591,24 +3063,21 @@ where
         DynValueKind::Null => {
             // Check if there's a Null variant or fallback for Option-like enums
             // Note: we match against the Rust name (v.name) since these are well-known Rust identifiers
-            if let Some((variant_index, variant)) =
-                find_variant_with_cancellation::<S::Error>(enum_def, should_cancel, |variant| {
-                    variant.name.eq_ignore_ascii_case("null") || variant.name == "None"
-                })?
+            if let Some((variant_index, variant)) = enum_def
+                .variants
+                .iter()
+                .enumerate()
+                .find(|(_, v)| v.name.eq_ignore_ascii_case("null") || v.name == "None")
             {
                 if use_index {
-                    check_cancellation(should_cancel)?;
                     serializer
                         .begin_enum_variant(variant_index, variant.effective_name())
                         .map_err(SerializeError::Backend)?;
-                    check_cancellation(should_cancel)?;
                     Ok(())
                 } else {
-                    check_cancellation(should_cancel)?;
                     serializer
                         .scalar(ScalarValue::Str(Cow::Borrowed(variant.effective_name())))
-                        .map_err(SerializeError::Backend)?;
-                    check_cancellation(should_cancel)
+                        .map_err(SerializeError::Backend)
                 }
             } else {
                 Err(SerializeError::Unsupported(Cow::Borrowed(

@@ -3523,7 +3523,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-format"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "ariadne",
  "teamy-facet",
@@ -3537,7 +3537,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-json"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "axum-core",
  "bstr",

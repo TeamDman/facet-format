@@ -76,7 +76,7 @@ pub use serializer::{
     to_string_with_options, to_vec, to_vec_pretty, to_vec_with_options, to_writer_std,
     to_writer_std_pretty, to_writer_std_with_options,
 };
-// Re-export shared error types for cancellation inspection.
+// Re-export shared deserialization and serialization errors.
 pub use facet_format::{DeserializeError, SerializeError};
 
 /// Deserialize a value from a JSON string into an owned type.

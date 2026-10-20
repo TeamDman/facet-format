@@ -53,9 +53,9 @@ facet-testhelpers = { package = "teamy-facet-testhelpers", path = "../facet/face
 rediff = "0.50.0-rc.6"
 facet-dessert = { package = "teamy-facet-dessert", path = "facet-dessert", version = "=0.50.0-rc.7" }
 facet-dom = { path = "facet-dom", version = "0.50.0-rc.7" }
-facet-format = { package = "teamy-facet-format", path = "facet-format", version = "=0.50.0-rc.8" }
+facet-format = { package = "teamy-facet-format", path = "facet-format", version = "=0.50.0-rc.9" }
 facet-format-suite = { path = "facet-format-suite", version = "0.50.0-rc.0" }
-facet-json = { package = "teamy-facet-json", path = "facet-json", version = "=0.50.0-rc.8" }
+facet-json = { package = "teamy-facet-json", path = "facet-json", version = "=0.50.0-rc.9" }
 facet-json-classics = { path = "facet-json-classics", version = "0.50.0-rc.0" }
 facet-msgpack = { path = "facet-msgpack", version = "0.50.0-rc.7" }
 facet-postcard = { path = "facet-postcard", version = "0.50.0-rc.7" }

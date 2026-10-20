@@ -1,15 +1,14 @@
 use facet::Facet;
 use facet_format::serialize_root;
 use facet_json::{
-    HexBytesOptions, JsonSerializeError, JsonSerializer, SerializeError, SerializeOptions,
-    to_vec_with_options, to_writer_std, to_writer_std_with_options,
+    HexBytesOptions, JsonSerializer, SerializeOptions, to_vec_with_options, to_writer_std,
+    to_writer_std_with_options,
 };
 use facet_reflect::Peek;
 use std::cell::RefCell;
 use std::fmt;
 use std::io::{self, BufWriter, Write};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
 struct Observation {
@@ -160,11 +159,13 @@ struct ShortWriter {
     limit: usize,
     interruptions: usize,
     calls: usize,
+    largest_request: usize,
 }
 
 impl Write for ShortWriter {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.calls += 1;
+        self.largest_request = self.largest_request.max(bytes.len());
         if self.interruptions > 0 {
             self.interruptions -= 1;
             return Err(io::ErrorKind::Interrupted.into());
@@ -188,7 +189,6 @@ struct Document {
 
 #[test]
 fn short_writes_and_interruptions_preserve_compact_pretty_utf8_and_byte_output() {
-    let checker = || false;
     let document = Document {
         text: "a\\b\"雪💚\n\u{0000}\u{001f}".repeat(1_000),
         bytes: vec![0, 1, 17, 42, 127, 255],
@@ -210,8 +210,7 @@ fn short_writes_and_interruptions_preserve_compact_pretty_utf8_and_byte_output()
             ..ShortWriter::default()
         };
 
-        to_writer_std_with_options(&mut writer, &document, &options.cancellation(&checker))
-            .unwrap();
+        to_writer_std_with_options(&mut writer, &document, &options).unwrap();
 
         assert_eq!(writer.bytes, expected);
         assert_eq!(writer.interruptions, 0);
@@ -219,16 +218,18 @@ fn short_writes_and_interruptions_preserve_compact_pretty_utf8_and_byte_output()
     }
 }
 
-struct InterruptedCancellation<'a> {
-    cancelled: &'a AtomicBool,
+struct InterruptedThenFailure {
     calls: usize,
 }
 
-impl Write for InterruptedCancellation<'_> {
+impl Write for InterruptedThenFailure {
     fn write(&mut self, _: &[u8]) -> io::Result<usize> {
         self.calls += 1;
-        self.cancelled.store(true, Ordering::Relaxed);
-        Err(io::ErrorKind::Interrupted.into())
+        if self.calls == 1 {
+            Err(io::ErrorKind::Interrupted.into())
+        } else {
+            Err(io::Error::other(WriterFailure { operation: "stop" }))
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -237,42 +238,20 @@ impl Write for InterruptedCancellation<'_> {
 }
 
 #[test]
-fn an_interrupted_write_checks_cancellation_before_retrying() {
-    let cancelled = AtomicBool::new(false);
-    let checker = || cancelled.load(Ordering::Relaxed);
-    let mut writer = InterruptedCancellation {
-        cancelled: &cancelled,
-        calls: 0,
-    };
+fn a_nonretryable_writer_error_after_an_interruption_keeps_its_payload() {
+    let mut writer = InterruptedThenFailure { calls: 0 };
 
-    let error = to_writer_std_with_options(
-        &mut writer,
-        &"not emitted",
-        &SerializeOptions::new().cancellation(&checker),
-    )
-    .unwrap_err();
+    let error = to_writer_std(&mut writer, &"not emitted").unwrap_err();
 
-    assert_eq!(writer.calls, 1);
-    assert_eq!(error.kind(), io::ErrorKind::Other);
-    assert!(matches!(
-        error
-            .get_ref()
-            .and_then(|error| error.downcast_ref::<SerializeError<JsonSerializeError>>()),
-        Some(SerializeError::Cancelled)
-    ));
+    assert_eq!(writer.calls, 2);
+    assert_original_failure(&error, io::ErrorKind::Other, "stop");
 }
 
 #[test]
 fn a_sink_that_cannot_make_progress_returns_write_zero() {
     let mut writer = ShortWriter::default();
-    let checker = || false;
 
-    let error = to_writer_std_with_options(
-        &mut writer,
-        &[1, 2, 3],
-        &SerializeOptions::new().cancellation(&checker),
-    )
-    .unwrap_err();
+    let error = to_writer_std(&mut writer, &[1, 2, 3]).unwrap_err();
 
     assert_eq!(error.kind(), io::ErrorKind::WriteZero);
     assert_eq!(writer.calls, 1);
@@ -317,4 +296,37 @@ fn finishing_a_generic_serializer_returns_its_sink_without_flushing() {
     assert_eq!(observation.borrow().flushes, 0);
     writer.flush().unwrap();
     assert_eq!(observation.borrow().flushes, 1);
+}
+
+#[test]
+fn large_strings_emit_bounded_runs_with_valid_utf8_and_escaping() {
+    for text in [
+        "x".repeat(100_000),
+        "雪💚é".repeat(25_000),
+        "雪\n\"é".repeat(25_000),
+    ] {
+        let mut writer = ShortWriter {
+            limit: usize::MAX,
+            ..ShortWriter::default()
+        };
+
+        to_writer_std(&mut writer, &text).unwrap();
+
+        assert!(writer.largest_request <= 4096);
+        assert!(writer.calls > 2);
+        assert_eq!(
+            serde_json::from_slice::<String>(&writer.bytes).unwrap(),
+            text
+        );
+    }
+}
+
+#[test]
+fn del_escaping_is_consistent_across_scan_and_write_boundaries() {
+    for prefix_length in [0, 15, 16, 4095, 4096] {
+        let padding = "x".repeat(prefix_length);
+        let value = format!("{padding}\u{7f}");
+        let expected = format!("\"{padding}\\u007f\"");
+        assert_eq!(facet_json::to_string(&value).unwrap(), expected);
+    }
 }
