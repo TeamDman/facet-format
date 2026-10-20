@@ -14,8 +14,8 @@ continues in the [Facet monorepo](https://github.com/facet-rs/facet).
 Report Teamy packaging or fork issues to
 [TeamDman/facet-format](https://github.com/TeamDman/facet-format/issues).
 
-The publishing branch is `teamy-main`. Format and JSON use `0.50.0-rc.9`;
-Value and CSV remain `0.50.0-rc.8`, and Dessert and the core Facet family remain
+The publishing branch is `teamy-main`. Format, JSON, and Value use `0.50.0-rc.9`;
+CSV remains `0.50.0-rc.8`, and Dessert and the core Facet family remain
 `0.50.0-rc.7`. Format traversal emits fields incrementally. JSON writes directly
 to caller-owned writers, whose errors also provide cooperative cancellation.
 
@@ -24,7 +24,7 @@ to caller-owned writers, whose errors also provide cooperative cancellation.
 | `teamy-facet-format` | `0.50.0-rc.9` | `facet_format` |
 | `teamy-facet-dessert` | `0.50.0-rc.7` | `facet_dessert` |
 | `teamy-facet-json` | `0.50.0-rc.9` | `facet_json` |
-| `teamy-facet-value` | `0.50.0-rc.8` | `facet_value` |
+| `teamy-facet-value` | `0.50.0-rc.9` | `facet_value` |
 | `teamy-facet-csv` | `0.50.0-rc.8` | `facet_csv` |
 
 Use Cargo package aliases to keep the original Rust import names:
@@ -35,7 +35,7 @@ facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
 facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.9" }
 facet-dessert = { package = "teamy-facet-dessert", version = "=0.50.0-rc.7" }
 facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.9" }
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.8" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.9" }
 ```
 
 All public Facet types must come from the same Teamy core family. The fork

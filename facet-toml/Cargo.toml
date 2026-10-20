@@ -40,7 +40,7 @@ facet-format-suite = { path = "../facet-format-suite", features = [
   "net",
 ] }
 facet-json-classics = { path = "../facet-json-classics" }
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.8", path = "../facet-value" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.9", path = "../facet-value" }
 facet-testhelpers.workspace = true
 facet-reflect = { workspace = true, features = ["tracing"] }
 libtest-mimic = "0.8.1"
