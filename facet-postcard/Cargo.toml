@@ -47,7 +47,7 @@ facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.9", path 
 facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.9", path = "../facet-json" }
 facet-json-classics = { path = "../facet-json-classics" }
 facet-testhelpers.workspace = true
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.8", path = "../facet-value" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.9", path = "../facet-value" }
 serde_json = { workspace = true }
 jiff = { workspace = true }
 ordered-float = { version = "5.0.0", default-features = false }

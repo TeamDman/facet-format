@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [Teamy Value 0.50.0-rc.9] - 2026-10-20
+
+### Changed
+
+- Align Value's exact Format dependency with `teamy-facet-format` `0.50.0-rc.9` so applications can use the new Format/JSON release without local patches. Value APIs and implementation remain unchanged.
+
 ## [Teamy Format/JSON 0.50.0-rc.9] - 2026-10-20
 
 ### Changed

@@ -12,8 +12,12 @@ Install with the original Rust import name and the matching Teamy core:
 ```toml
 [dependencies]
 facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.8" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.9" }
 ```
+
+Version `0.50.0-rc.9` aligns the exact Format dependency with Teamy Format/JSON
+`0.50.0-rc.9`; the core Facet family remains `0.50.0-rc.7`. This is a dependency
+compatibility release with no Value API or implementation changes.
 
 [![crates.io](https://img.shields.io/crates/v/teamy-facet-value.svg)](https://crates.io/crates/teamy-facet-value)
 [![documentation](https://docs.rs/teamy-facet-value/badge.svg)](https://docs.rs/teamy-facet-value)
