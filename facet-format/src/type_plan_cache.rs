@@ -33,59 +33,50 @@ where
 }
 
 #[cfg(test)]
-fn clear_cache_for_tests() {
-    cache()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .clear();
-}
-
-#[cfg(test)]
-fn cache_len_for_tests() -> usize {
-    cache()
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .len()
-}
-
-#[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{cache, cached_type_plan_arc};
+    use facet::Facet;
+    use facet_reflect::TypePlanCore;
+    use std::sync::Arc;
 
-    fn test_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    fn cache_entry<T: Facet<'static>>() -> Option<Arc<TypePlanCore>> {
+        cache()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(&T::SHAPE)
+            .cloned()
     }
 
     #[test]
     fn cache_hit_miss_behavior() {
-        let _guard = test_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        clear_cache_for_tests();
-        assert_eq!(cache_len_for_tests(), 0);
+        #[derive(Facet)]
+        #[allow(dead_code, reason = "fixture fields are inspected through Facet")]
+        struct HitMissRoot(i32);
 
-        let first = cached_type_plan_arc::<i32>().unwrap();
-        assert_eq!(cache_len_for_tests(), 1);
+        assert!(cache_entry::<HitMissRoot>().is_none());
 
-        let second = cached_type_plan_arc::<i32>().unwrap();
-        assert_eq!(cache_len_for_tests(), 1);
+        let first = cached_type_plan_arc::<HitMissRoot>().unwrap();
+        assert!(Arc::ptr_eq(&first, &cache_entry::<HitMissRoot>().unwrap()));
+
+        let second = cached_type_plan_arc::<HitMissRoot>().unwrap();
         assert!(Arc::ptr_eq(&first, &second));
+        assert!(Arc::ptr_eq(&second, &cache_entry::<HitMissRoot>().unwrap()));
     }
 
     #[test]
     fn cache_concurrent_access_single_shape() {
-        let _guard = test_lock()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        clear_cache_for_tests();
+        #[derive(Facet)]
+        #[allow(dead_code, reason = "fixture fields are inspected through Facet")]
+        struct ConcurrentRoot(Option<Vec<u64>>);
+
+        assert!(cache_entry::<ConcurrentRoot>().is_none());
 
         let mut joins = Vec::new();
         for _ in 0..12 {
             joins.push(std::thread::spawn(|| {
                 let mut ptrs = Vec::new();
                 for _ in 0..40 {
-                    let plan = cached_type_plan_arc::<Option<Vec<u64>>>().unwrap();
+                    let plan = cached_type_plan_arc::<ConcurrentRoot>().unwrap();
                     ptrs.push(Arc::as_ptr(&plan) as usize);
                 }
                 ptrs
@@ -99,6 +90,9 @@ mod tests {
 
         let first = *all_ptrs.first().unwrap();
         assert!(all_ptrs.into_iter().all(|ptr| ptr == first));
-        assert_eq!(cache_len_for_tests(), 1);
+        assert_eq!(
+            Arc::as_ptr(&cache_entry::<ConcurrentRoot>().unwrap()) as usize,
+            first
+        );
     }
 }

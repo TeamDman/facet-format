@@ -18,7 +18,7 @@ rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
 facet-core.workspace = true
-facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.8", path = "../facet-format", }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.9", path = "../facet-format", }
 facet-reflect.workspace = true
 [dev-dependencies]
 facet = { workspace = true, features = ["std", "all-impls"] }
