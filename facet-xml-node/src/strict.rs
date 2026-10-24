@@ -51,10 +51,10 @@ pub struct StrictDocument {
 impl StrictDocument {
     /// Parse a bounded response, retaining its exact bytes for audit and diff binding.
     pub fn parse(input: &[u8], limits: StrictXmlLimits) -> Result<Self, StrictError> {
-        let mut parser = XmlParser::new_strict(input, limits).map_err(StrictError::Xml)?;
+        let mut parser = XmlParser::new_strict(input, limits).map_err(redact_xml_error)?;
         let mut stack: Vec<StrictElement> = Vec::new();
         let mut root = None;
-        while let Some(event) = parser.next_event().map_err(StrictError::Xml)? {
+        while let Some(event) = parser.next_event().map_err(redact_xml_error)? {
             match event {
                 DomEvent::NodeStart { tag, namespace } => stack.push(StrictElement {
                     name: ExpandedName {
@@ -181,3 +181,12 @@ impl std::fmt::Display for StrictError {
 }
 
 impl std::error::Error for StrictError {}
+
+fn redact_xml_error(error: XmlError) -> StrictError {
+    match error {
+        // Parser diagnostics may quote attacker-controlled source. The strict
+        // API never exposes source fragments through Display or Debug.
+        XmlError::Parse(_) => StrictError::Xml(XmlError::Strict("malformed XML")),
+        other => StrictError::Xml(other),
+    }
+}

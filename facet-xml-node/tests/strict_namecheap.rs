@@ -121,3 +121,15 @@ fn write_schema_rejects_text_not_represented_by_host_attributes() {
         Err(StrictError::UnexpectedText)
     ));
 }
+
+#[test]
+fn parser_diagnostics_do_not_echo_response_values() {
+    let error = StrictDocument::parse(
+        b"<ApiResponse value='SYNTHETIC_MARKER' value='SYNTHETIC_MARKER'/>",
+        StrictXmlLimits::default(),
+    )
+    .err()
+    .unwrap();
+    assert!(!format!("{error:?}").contains("SYNTHETIC_MARKER"));
+    assert!(!error.to_string().contains("SYNTHETIC_MARKER"));
+}
