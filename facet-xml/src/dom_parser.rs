@@ -198,6 +198,7 @@ impl<'de> XmlParser<'de> {
 
     /// Read the next raw event from quick-xml and convert to DomEvent.
     fn read_next(&mut self) -> Result<Option<DomEvent<'de>>, XmlError> {
+        let strict = self.strict;
         loop {
             match self.state {
                 ParserState::Done => return Ok(None),
@@ -257,7 +258,7 @@ impl<'de> XmlParser<'de> {
                     let (resolve, event) = self
                         .reader
                         .read_resolved_event_into(&mut self.buf)
-                        .map_err(|e| XmlError::Parse(e.to_string()))?;
+                        .map_err(|e| parser_error(strict, e))?;
 
                     if let Some(limits) = self.limits {
                         self.raw_events += 1;
@@ -300,7 +301,7 @@ impl<'de> XmlParser<'de> {
                             self.attr_idx = 0;
 
                             for attr in e.attributes() {
-                                let attr = attr.map_err(|e| XmlError::Parse(e.to_string()))?;
+                                let attr = attr.map_err(|e| parser_error(strict, e))?;
 
                                 // Skip xmlns declarations
                                 let key = attr.key;
@@ -322,7 +323,7 @@ impl<'de> XmlParser<'de> {
 
                                 let value = attr
                                     .decode_and_unescape_value(self.reader.decoder())
-                                    .map_err(|e| XmlError::Parse(e.to_string()))?;
+                                    .map_err(|e| parser_error(strict, e))?;
                                 if self
                                     .limits
                                     .is_some_and(|limits| value.len() > limits.max_value_bytes)
@@ -358,7 +359,7 @@ impl<'de> XmlParser<'de> {
                             self.state = ParserState::NeedChildrenEnd;
                         }
                         Event::Text(e) => {
-                            let text = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
+                            let text = e.decode().map_err(|e| parser_error(strict, e))?;
                             if self.strict {
                                 if self.depth == 0 {
                                     if text.trim().is_empty() {
@@ -447,8 +448,14 @@ impl<'de> XmlParser<'de> {
                             return Ok(None);
                         }
                         Event::GeneralRef(e) => {
-                            let raw = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
-                            let resolved = resolve_entity(&raw)?;
+                            let raw = e.decode().map_err(|e| parser_error(strict, e))?;
+                            let resolved = resolve_entity(&raw).map_err(|error| {
+                                if strict {
+                                    XmlError::Strict("malformed XML entity")
+                                } else {
+                                    error
+                                }
+                            })?;
                             if self.strict {
                                 if self.depth == 0 {
                                     return Err(XmlError::Strict("entity outside document root"));
@@ -508,6 +515,14 @@ impl<'de> DomParser<'de> for XmlParser<'de> {
 
     fn capture_raw_node(&mut self) -> Result<Option<Cow<'de, str>>, Self::Error> {
         Ok(Some(self.do_capture_raw_node()?))
+    }
+}
+
+fn parser_error(strict: bool, error: impl fmt::Display) -> XmlError {
+    if strict {
+        XmlError::Strict("malformed XML")
+    } else {
+        XmlError::Parse(error.to_string())
     }
 }
 
