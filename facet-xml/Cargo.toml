@@ -26,7 +26,7 @@ facet-core.workspace = true
 facet-dom = { workspace = true }
 facet-reflect.workspace = true
 # XML parsing - using quick-xml which is the most mature Rust XML parser
-quick-xml = { version = "0.39", default-features = false }
+quick-xml = { version = "=0.41.0", default-features = false }
 
 # Tracing (optional - compiles to nothing when disabled)
 tracing = { workspace = true, optional = true }

@@ -133,3 +133,72 @@ fn parser_diagnostics_do_not_echo_response_values() {
     assert!(!format!("{error:?}").contains("SYNTHETIC_MARKER"));
     assert!(!error.to_string().contains("SYNTHETIC_MARKER"));
 }
+
+#[test]
+fn namespace_and_attribute_caps_apply_at_parser_boundary() {
+    let mut limits = StrictXmlLimits::default();
+    limits.max_attributes = 2;
+    for input in ["<r xmlns:a='urn:a' xmlns:b='urn:b'/>", "<r a='1' b='2'/>"] {
+        assert!(
+            StrictDocument::parse(input.as_bytes(), limits).is_ok(),
+            "{input}"
+        );
+    }
+    for input in [
+        "<r xmlns:a='urn:a' xmlns:b='urn:b' xmlns:c='urn:c'/>",
+        "<r a='1' b='2' c='3'/>",
+    ] {
+        assert!(
+            StrictDocument::parse(input.as_bytes(), limits).is_err(),
+            "{input}"
+        );
+    }
+    limits.max_depth = 1025;
+    assert!(StrictDocument::parse(b"<r/>", limits).is_err());
+
+    let default_limits = StrictXmlLimits::default();
+    for namespace in [true, false] {
+        let mut input = String::from("<r");
+        for index in 0..129 {
+            if namespace {
+                input.push_str(&format!(" xmlns:n{index}='urn:{index}'"));
+            } else {
+                input.push_str(&format!(" a{index}='{index}'"));
+            }
+        }
+        input.push_str("/>");
+        assert!(StrictDocument::parse(input.as_bytes(), default_limits).is_err());
+    }
+
+    let mut event_limited = default_limits;
+    event_limited.max_events = 1;
+    assert!(StrictDocument::parse(b"<r/>", event_limited).is_err());
+    let mut value_limited = default_limits;
+    value_limited.max_value_bytes = 2;
+    assert!(StrictDocument::parse(b"<r a='long'/>", value_limited).is_err());
+    assert!(StrictDocument::parse(b"<r xmlns:x='long'/>", value_limited).is_err());
+}
+
+#[test]
+fn strict_mode_rejects_ambiguous_declarations_and_literal_whitespace() {
+    for input in [
+        "<?xml version='1.1'?><r/>",
+        "<?xml version='1.0' encoding='ISO-8859-1'?><r/>",
+        "<?xml version='1.0'?><?xml version='1.0'?><r/>",
+        "<r value='a\tb'/>",
+        "<r value='a\nb'/>",
+        "<r value='a\rb'/>",
+        "<r xmlns:x='urn:a&amp;b'><x:host/></r>",
+    ] {
+        assert!(
+            StrictDocument::parse(input.as_bytes(), StrictXmlLimits::default()).is_err(),
+            "{input}"
+        );
+    }
+    let documented = StrictDocument::parse(
+        b"<?xml version='1.0' encoding='UTF-8'?><r value='a&#9;b'/>",
+        StrictXmlLimits::default(),
+    )
+    .unwrap();
+    assert_eq!(documented.root().attributes()[0].value(), "a\tb");
+}
