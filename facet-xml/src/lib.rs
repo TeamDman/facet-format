@@ -11,7 +11,7 @@ mod serializer;
 #[cfg(feature = "axum")]
 mod axum;
 
-pub use dom_parser::{XmlError, XmlParser};
+pub use dom_parser::{StrictXmlLimits, XmlError, XmlParser};
 
 #[cfg(feature = "axum")]
 pub use axum::{Xml, XmlRejection};

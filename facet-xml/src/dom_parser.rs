@@ -25,6 +25,8 @@ pub enum XmlError {
     UnbalancedTags,
     /// Invalid UTF-8.
     InvalidUtf8(core::str::Utf8Error),
+    /// A strict parsing rule or resource limit was violated.
+    Strict(&'static str),
 }
 
 impl fmt::Display for XmlError {
@@ -34,6 +36,7 @@ impl fmt::Display for XmlError {
             XmlError::UnexpectedEof => write!(f, "Unexpected end of XML"),
             XmlError::UnbalancedTags => write!(f, "Unbalanced XML tags"),
             XmlError::InvalidUtf8(e) => write!(f, "Invalid UTF-8 in XML: {}", e),
+            XmlError::Strict(reason) => write!(f, "Strict XML parse rejected: {reason}"),
         }
     }
 }
@@ -61,6 +64,38 @@ pub struct XmlParser<'de> {
     is_empty_element: bool,
     /// Position where current node started (for raw capture)
     node_start_pos: u64,
+    strict: bool,
+    limits: Option<StrictXmlLimits>,
+    raw_events: usize,
+    root_seen: bool,
+    root_closed: bool,
+}
+
+/// Conservative limits for untrusted XML API responses.
+#[derive(Debug, Clone, Copy)]
+pub struct StrictXmlLimits {
+    /// Maximum encoded input size, in bytes.
+    pub max_input_bytes: usize,
+    /// Maximum nested element depth.
+    pub max_depth: usize,
+    /// Maximum raw parser events.
+    pub max_events: usize,
+    /// Maximum attributes on one element, including namespace declarations.
+    pub max_attributes: usize,
+    /// Maximum decoded length of one text or attribute value.
+    pub max_value_bytes: usize,
+}
+
+impl Default for StrictXmlLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: 1024 * 1024,
+            max_depth: 64,
+            max_events: 100_000,
+            max_attributes: 128,
+            max_value_bytes: 64 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -100,7 +135,36 @@ impl<'de> XmlParser<'de> {
             state: ParserState::Ready,
             is_empty_element: false,
             node_start_pos: 0,
+            strict: false,
+            limits: None,
+            raw_events: 0,
+            root_seen: false,
+            root_closed: false,
         }
+    }
+
+    /// Parse untrusted API XML with bounded resources and without whitespace trimming.
+    /// This entry point rejects DTDs, processing instructions, comments, unknown
+    /// entities, undeclared prefixes, and multiple roots. It does not serialize.
+    pub fn new_strict(input: &'de [u8], limits: StrictXmlLimits) -> Result<Self, XmlError> {
+        if input.len() > limits.max_input_bytes {
+            return Err(XmlError::Strict("input size limit"));
+        }
+        let mut parser = Self::new(input);
+        parser.reader.config_mut().trim_text(false);
+        parser.strict = true;
+        parser.limits = Some(limits);
+        Ok(parser)
+    }
+
+    /// Byte offset of the most recently opened element in the original input.
+    pub fn last_node_start(&self) -> usize {
+        self.node_start_pos as usize
+    }
+
+    /// Byte offset immediately after the most recently consumed XML token.
+    pub fn input_offset(&self) -> usize {
+        self.reader.buffer_position() as usize
     }
 
     /// Capture the current node as raw XML and skip past it.
@@ -173,7 +237,12 @@ impl<'de> XmlParser<'de> {
                 ParserState::NeedNodeEnd => {
                     self.depth -= 1;
                     self.state = if self.depth == 0 {
-                        ParserState::Done
+                        if self.strict {
+                            self.root_closed = true;
+                            ParserState::Ready
+                        } else {
+                            ParserState::Done
+                        }
                     } else {
                         ParserState::InChildren
                     };
@@ -190,11 +259,32 @@ impl<'de> XmlParser<'de> {
                         .read_resolved_event_into(&mut self.buf)
                         .map_err(|e| XmlError::Parse(e.to_string()))?;
 
+                    if let Some(limits) = self.limits {
+                        self.raw_events += 1;
+                        if self.raw_events > limits.max_events {
+                            return Err(XmlError::Strict("event count limit"));
+                        }
+                    }
+
                     // Resolve element namespace upfront
-                    let elem_ns = resolve_namespace(resolve)?;
+                    let elem_ns = resolve_namespace(resolve, self.strict)?;
 
                     match event {
                         Event::Start(ref e) | Event::Empty(ref e) => {
+                            if self.strict && self.depth == 0 {
+                                if self.root_seen {
+                                    return Err(XmlError::Strict("multiple document roots"));
+                                }
+                                self.root_seen = true;
+                            }
+                            if let Some(limits) = self.limits {
+                                if self.depth >= limits.max_depth {
+                                    return Err(XmlError::Strict("element depth limit"));
+                                }
+                                if e.attributes().count() > limits.max_attributes {
+                                    return Err(XmlError::Strict("attribute count limit"));
+                                }
+                            }
                             let is_empty = matches!(event, Event::Empty(_));
                             // Record start position for potential raw capture
                             self.node_start_pos = pos_before;
@@ -225,7 +315,7 @@ impl<'de> XmlParser<'de> {
 
                                 let (attr_resolve, _) =
                                     self.reader.resolver().resolve_attribute(key);
-                                let attr_ns = resolve_namespace(attr_resolve)?;
+                                let attr_ns = resolve_namespace(attr_resolve, self.strict)?;
                                 let attr_local_name = key.local_name();
                                 let attr_local = core::str::from_utf8(attr_local_name.as_ref())
                                     .map_err(XmlError::InvalidUtf8)?;
@@ -233,6 +323,12 @@ impl<'de> XmlParser<'de> {
                                 let value = attr
                                     .decode_and_unescape_value(self.reader.decoder())
                                     .map_err(|e| XmlError::Parse(e.to_string()))?;
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| value.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("attribute value limit"));
+                                }
 
                                 self.pending_attrs.push((
                                     attr_ns,
@@ -256,10 +352,28 @@ impl<'de> XmlParser<'de> {
                             }));
                         }
                         Event::End(_) => {
+                            if self.strict && self.depth == 0 {
+                                return Err(XmlError::Strict("unmatched closing element"));
+                            }
                             self.state = ParserState::NeedChildrenEnd;
                         }
                         Event::Text(e) => {
                             let text = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
+                            if self.strict {
+                                if self.depth == 0 {
+                                    if text.trim().is_empty() {
+                                        continue;
+                                    }
+                                    return Err(XmlError::Strict("text outside document root"));
+                                }
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| text.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("text value limit"));
+                                }
+                                return Ok(Some(DomEvent::Text(Cow::Owned(text.into_owned()))));
+                            }
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
                                 return Ok(Some(DomEvent::Text(Cow::Owned(trimmed.to_string()))));
@@ -268,16 +382,35 @@ impl<'de> XmlParser<'de> {
                         Event::CData(e) => {
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
+                            if self.strict {
+                                if self.depth == 0 {
+                                    return Err(XmlError::Strict("CDATA outside document root"));
+                                }
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| text.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("text value limit"));
+                                }
+                            }
                             if !text.is_empty() {
                                 return Ok(Some(DomEvent::Text(Cow::Owned(text.to_string()))));
                             }
                         }
                         Event::Comment(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("comments are not supported"));
+                            }
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             return Ok(Some(DomEvent::Comment(Cow::Owned(text.to_string()))));
                         }
                         Event::PI(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict(
+                                    "processing instructions are not supported",
+                                ));
+                            }
                             let content =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             let (target, data) = content
@@ -289,21 +422,41 @@ impl<'de> XmlParser<'de> {
                             }));
                         }
                         Event::Decl(_) => {
-                            // XML declaration - skip
+                            if self.strict && self.root_seen {
+                                return Err(XmlError::Strict(
+                                    "XML declaration after document root",
+                                ));
+                            }
                         }
                         Event::DocType(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("DOCTYPE is not supported"));
+                            }
                             // Parse DOCTYPE declaration and emit as DomEvent
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             return Ok(Some(DomEvent::Doctype(Cow::Owned(text.to_string()))));
                         }
                         Event::Eof => {
+                            if self.strict
+                                && (!self.root_seen || !self.root_closed || self.depth != 0)
+                            {
+                                return Err(XmlError::Strict("incomplete XML document"));
+                            }
                             self.state = ParserState::Done;
                             return Ok(None);
                         }
                         Event::GeneralRef(e) => {
                             let raw = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
                             let resolved = resolve_entity(&raw)?;
+                            if self.strict {
+                                if self.depth == 0 {
+                                    return Err(XmlError::Strict("entity outside document root"));
+                                }
+                                if resolved.starts_with('&') && resolved.ends_with(';') {
+                                    return Err(XmlError::Strict("unknown entity"));
+                                }
+                            }
                             return Ok(Some(DomEvent::Text(Cow::Owned(resolved))));
                         }
                     }
@@ -359,10 +512,11 @@ impl<'de> DomParser<'de> for XmlParser<'de> {
 }
 
 /// Resolve a namespace from quick-xml's ResolveResult.
-fn resolve_namespace(resolve: ResolveResult<'_>) -> Result<Option<String>, XmlError> {
+fn resolve_namespace(resolve: ResolveResult<'_>, strict: bool) -> Result<Option<String>, XmlError> {
     match resolve {
         ResolveResult::Bound(ns) => Ok(Some(String::from_utf8_lossy(ns.as_ref()).into_owned())),
         ResolveResult::Unbound => Ok(None),
+        ResolveResult::Unknown(_) if strict => Err(XmlError::Strict("undeclared namespace prefix")),
         ResolveResult::Unknown(_) => Ok(None),
     }
 }

@@ -1,5 +1,5 @@
 [package]
-name = "facet-dom"
+name = "teamy-facet-dom"
 version = "0.50.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
