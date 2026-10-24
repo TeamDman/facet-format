@@ -143,9 +143,11 @@ impl<'de> XmlParser<'de> {
         }
     }
 
-    /// Parse untrusted API XML with bounded resources and without whitespace trimming.
-    /// This entry point rejects DTDs, processing instructions, comments, unknown
-    /// entities, undeclared prefixes, and multiple roots. It does not serialize.
+    /// Apply response-size and structural limits without whitespace trimming.
+    /// This entry point rejects DTDs, processing instructions, comments, CDATA,
+    /// unknown entities, undeclared prefixes, and multiple roots. It does not serialize.
+    /// With locked quick-xml 0.39.4, namespace declarations are processed before
+    /// the attribute cap below; review the parser version before live API use.
     pub fn new_strict(input: &'de [u8], limits: StrictXmlLimits) -> Result<Self, XmlError> {
         if input.len() > limits.max_input_bytes {
             return Err(XmlError::Strict("input size limit"));
@@ -381,19 +383,11 @@ impl<'de> XmlParser<'de> {
                             }
                         }
                         Event::CData(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("CDATA is not supported"));
+                            }
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
-                            if self.strict {
-                                if self.depth == 0 {
-                                    return Err(XmlError::Strict("CDATA outside document root"));
-                                }
-                                if self
-                                    .limits
-                                    .is_some_and(|limits| text.len() > limits.max_value_bytes)
-                                {
-                                    return Err(XmlError::Strict("text value limit"));
-                                }
-                            }
                             if !text.is_empty() {
                                 return Ok(Some(DomEvent::Text(Cow::Owned(text.to_string()))));
                             }
@@ -529,6 +523,11 @@ fn parser_error(strict: bool, error: impl fmt::Display) -> XmlError {
 /// Resolve a namespace from quick-xml's ResolveResult.
 fn resolve_namespace(resolve: ResolveResult<'_>, strict: bool) -> Result<Option<String>, XmlError> {
     match resolve {
+        ResolveResult::Bound(ns) if strict => Ok(Some(
+            core::str::from_utf8(ns.as_ref())
+                .map_err(XmlError::InvalidUtf8)?
+                .to_owned(),
+        )),
         ResolveResult::Bound(ns) => Ok(Some(String::from_utf8_lossy(ns.as_ref()).into_owned())),
         ResolveResult::Unbound => Ok(None),
         ResolveResult::Unknown(_) if strict => Err(XmlError::Strict("undeclared namespace prefix")),

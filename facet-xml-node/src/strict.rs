@@ -10,15 +10,33 @@ use facet_xml::{StrictXmlLimits, XmlError, XmlParser};
 /// XML expanded name: namespace URI plus local name.
 #[derive(Clone, PartialEq, Eq, facet::Facet)]
 pub struct ExpandedName {
-    pub namespace: Option<String>,
-    pub local: String,
+    namespace: Option<String>,
+    local: String,
+}
+
+impl ExpandedName {
+    pub fn namespace(&self) -> Option<&str> {
+        self.namespace.as_deref()
+    }
+    pub fn local(&self) -> &str {
+        &self.local
+    }
 }
 
 /// An ordered XML attribute. Namespace declarations remain in `source`.
 #[derive(Clone, PartialEq, Eq, facet::Facet)]
 pub struct StrictAttribute {
-    pub name: ExpandedName,
-    pub value: String,
+    name: ExpandedName,
+    value: String,
+}
+
+impl StrictAttribute {
+    pub fn name(&self) -> &ExpandedName {
+        &self.name
+    }
+    pub fn value(&self) -> &str {
+        &self.value
+    }
 }
 
 /// Text or a child element, in document order.
@@ -32,23 +50,39 @@ pub enum StrictContent {
 /// Namespace-aware element with ordered attributes and children.
 #[derive(Clone, PartialEq, Eq, facet::Facet)]
 pub struct StrictElement {
-    pub name: ExpandedName,
-    pub attributes: Vec<StrictAttribute>,
+    name: ExpandedName,
+    attributes: Vec<StrictAttribute>,
     #[facet(recursive_type)]
-    pub children: Vec<StrictContent>,
+    children: Vec<StrictContent>,
     /// Inclusive start byte offset in the original response.
-    pub raw_start: usize,
+    raw_start: usize,
     /// Exclusive end byte offset in the original response.
-    pub raw_end: usize,
+    raw_end: usize,
+}
+
+impl StrictElement {
+    pub fn name(&self) -> &ExpandedName {
+        &self.name
+    }
+    pub fn attributes(&self) -> &[StrictAttribute] {
+        &self.attributes
+    }
+    pub fn children(&self) -> &[StrictContent] {
+        &self.children
+    }
 }
 
 /// A parsed document together with its exact source bytes.
 pub struct StrictDocument {
-    pub root: StrictElement,
+    root: StrictElement,
     source: Vec<u8>,
 }
 
 impl StrictDocument {
+    /// Read-only root; the validated tree cannot be changed independently of source bytes.
+    pub fn root(&self) -> &StrictElement {
+        &self.root
+    }
     /// Parse a bounded response, retaining its exact bytes for audit and diff binding.
     pub fn parse(input: &[u8], limits: StrictXmlLimits) -> Result<Self, StrictError> {
         let mut parser = XmlParser::new_strict(input, limits).map_err(redact_xml_error)?;
@@ -118,7 +152,8 @@ impl StrictDocument {
         &self.source
     }
 
-    /// Exact source bytes for an element, including its original prefixes and declarations.
+    /// Exact lexical source slice for an element. Namespace declarations on
+    /// ancestors remain in [`Self::source`]; this slice may not parse alone.
     pub fn raw_node(&self, element: &StrictElement) -> Option<&[u8]> {
         self.source.get(element.raw_start..element.raw_end)
     }
@@ -143,10 +178,17 @@ impl StrictDocument {
                     return Err(StrictError::UnknownAttribute);
                 }
             }
+            let has_element_children = node
+                .children
+                .iter()
+                .any(|child| matches!(child, StrictContent::Element(_)));
             for child in &node.children {
                 match child {
                     StrictContent::Element(child) => visit(child, element, attribute)?,
-                    StrictContent::Text(text) if text.trim().is_empty() => {}
+                    // Inter-element whitespace is formatting. Text inside a
+                    // leaf (such as a Namecheap host) is never assumed safe.
+                    StrictContent::Text(text) if has_element_children && text.trim().is_empty() => {
+                    }
                     StrictContent::Text(_) => return Err(StrictError::UnexpectedText),
                 }
             }
