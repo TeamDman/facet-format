@@ -1170,7 +1170,7 @@ dependencies = [
 name = "facet-atom"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet-xml",
+ "teamy-facet-xml",
  "indoc",
  "teamy-facet",
  "teamy-facet-testhelpers",
@@ -1204,7 +1204,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-dom"
+name = "teamy-facet-dom"
 version = "0.50.0-rc.7"
 dependencies = [
  "facet-singularize",
@@ -1437,7 +1437,7 @@ name = "facet-svg"
 version = "0.50.0-rc.7"
 dependencies = [
  "datatest-stable",
- "facet-xml",
+ "teamy-facet-xml",
  "rediff",
  "teamy-facet",
  "teamy-facet-testhelpers",
@@ -1507,11 +1507,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-xml"
+name = "teamy-facet-xml"
 version = "0.50.0-rc.7"
 dependencies = [
  "axum-core",
- "facet-dom",
+ "teamy-facet-dom",
  "http",
  "http-body-util",
  "quick-xml",
@@ -1523,11 +1523,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-xml-node"
+name = "teamy-facet-xml-node"
 version = "0.50.0-rc.7"
 dependencies = [
- "facet-dom",
- "facet-xml",
+ "teamy-facet-dom",
+ "teamy-facet-xml",
  "teamy-facet",
  "teamy-facet-core",
  "teamy-facet-reflect",

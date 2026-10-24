@@ -1,5 +1,5 @@
 [package]
-name = "facet-xml"
+name = "teamy-facet-xml"
 version = "0.50.0-rc.7"
 edition.workspace = true
 rust-version.workspace = true
@@ -36,7 +36,7 @@ http-body-util = { version = "0.1", default-features = false, optional = true }
 facet = { workspace = true, features = ["doc", "net"] }
 facet-testhelpers.workspace = true
 tracing = { workspace = true }
-facet-dom = { path = "../facet-dom", features = ["tracing"] }
+facet-dom = { package = "teamy-facet-dom", path = "../facet-dom", features = ["tracing"] }
 facet-reflect = { workspace = true, features = ["tracing"] }
 
 [features]
