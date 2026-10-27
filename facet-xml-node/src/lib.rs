@@ -1,6 +1,7 @@
 //! Raw XML element types and deserialization from Element trees.
 
 mod parser;
+mod strict;
 
 use facet_xml as xml;
 use std::collections::HashMap;
@@ -8,6 +9,9 @@ use std::collections::HashMap;
 pub use parser::{
     ElementParseError, ElementParser, ElementSerializeError, ElementSerializer, from_element,
     to_element,
+};
+pub use strict::{
+    ExpandedName, StrictAttribute, StrictContent, StrictDocument, StrictElement, StrictError,
 };
 
 /// Error when navigating to a path in an Element tree.

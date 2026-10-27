@@ -24,7 +24,7 @@ tracing = { workspace = true, optional = true }
 datatest-stable = "0.3"
 rediff.workspace = true
 facet-testhelpers.workspace = true
-facet-xml = { path = "../facet-xml", features = ["tracing"] }
+facet-xml = { package = "teamy-facet-xml", path = "../facet-xml", features = ["tracing"] }
 tracing = { workspace = true }
 
 [features]
