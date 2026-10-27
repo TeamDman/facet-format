@@ -10,9 +10,15 @@ use std::io::Cursor;
 
 use facet_dom::{DomEvent, DomParser};
 use quick_xml::NsReader;
-use quick_xml::escape::resolve_xml_entity;
+use quick_xml::XmlVersion;
+use quick_xml::escape::{resolve_xml_entity, unescape};
 use quick_xml::events::Event;
 use quick_xml::name::ResolveResult;
+
+use crate::strict_validation::{
+    check_attribute_references, check_attribute_separators, check_characters, check_declaration,
+    check_name, check_reference, xml_whitespace,
+};
 
 /// XML parsing error.
 #[derive(Debug, Clone)]
@@ -25,6 +31,8 @@ pub enum XmlError {
     UnbalancedTags,
     /// Invalid UTF-8.
     InvalidUtf8(core::str::Utf8Error),
+    /// A strict parsing rule or resource limit was violated.
+    Strict(&'static str),
 }
 
 impl fmt::Display for XmlError {
@@ -34,6 +42,7 @@ impl fmt::Display for XmlError {
             XmlError::UnexpectedEof => write!(f, "Unexpected end of XML"),
             XmlError::UnbalancedTags => write!(f, "Unbalanced XML tags"),
             XmlError::InvalidUtf8(e) => write!(f, "Invalid UTF-8 in XML: {}", e),
+            XmlError::Strict(reason) => write!(f, "Strict XML parse rejected: {reason}"),
         }
     }
 }
@@ -61,6 +70,46 @@ pub struct XmlParser<'de> {
     is_empty_element: bool,
     /// Position where current node started (for raw capture)
     node_start_pos: u64,
+    strict: bool,
+    limits: Option<StrictXmlLimits>,
+    raw_events: usize,
+    decoded_bytes: usize,
+    root_seen: bool,
+    root_closed: bool,
+    decl_seen: bool,
+}
+
+/// Conservative limits for untrusted XML API responses.
+#[derive(Debug, Clone, Copy)]
+pub struct StrictXmlLimits {
+    /// Maximum encoded input size, in bytes.
+    pub max_input_bytes: usize,
+    /// Maximum nested element depth. Strict mode rejects settings above 1024
+    /// because quick-xml 0.41 counts namespace nesting with a u16.
+    pub max_depth: usize,
+    /// Maximum raw parser events.
+    pub max_events: usize,
+    /// Maximum attributes on one element, including namespace declarations.
+    pub max_attributes: usize,
+    /// Maximum decoded length of one text or attribute value.
+    pub max_value_bytes: usize,
+    /// Aggregate decoded string bytes processed, including repeated expanded
+    /// namespace names. This bounds retained string amplification; input and
+    /// tree/container overhead remain bounded separately by the other limits.
+    pub max_decoded_bytes: usize,
+}
+
+impl Default for StrictXmlLimits {
+    fn default() -> Self {
+        Self {
+            max_input_bytes: 1024 * 1024,
+            max_depth: 64,
+            max_events: 100_000,
+            max_attributes: 128,
+            max_value_bytes: 64 * 1024,
+            max_decoded_bytes: 4 * 1024 * 1024,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -83,6 +132,9 @@ enum ParserState {
 
 impl<'de> XmlParser<'de> {
     /// Create a new streaming XML parser.
+    ///
+    /// quick-xml 0.41 caps namespace declarations at 256 per element in this
+    /// legacy mode too. Other legacy text and attribute behavior is retained.
     pub fn new(input: &'de [u8]) -> Self {
         trace!(input_len = input.len(), "creating XML parser");
 
@@ -100,7 +152,61 @@ impl<'de> XmlParser<'de> {
             state: ParserState::Ready,
             is_empty_element: false,
             node_start_pos: 0,
+            strict: false,
+            limits: None,
+            raw_events: 0,
+            decoded_bytes: 0,
+            root_seen: false,
+            root_closed: false,
+            decl_seen: false,
         }
+    }
+
+    /// Apply response-size and structural limits without whitespace trimming.
+    /// This entry point rejects DTDs, processing instructions, comments, CDATA,
+    /// unknown entities, undeclared prefixes, and multiple roots. It does not serialize.
+    /// Namespace declarations are capped inside quick-xml before it returns a
+    /// start event. Strict mode accepts only XML 1.0 in UTF-8, and rejects
+    /// literal tab, CR, or LF inside attribute values and escaped namespace
+    /// declarations to avoid representing normalized or unresolved values.
+    pub fn new_strict(input: &'de [u8], limits: StrictXmlLimits) -> Result<Self, XmlError> {
+        // quick-xml 0.41 uses a u16 namespace nesting counter before returning
+        // each start event, so the downstream depth check must stay below it.
+        if limits.max_depth > 1024 {
+            return Err(XmlError::Strict(
+                "configured depth limit exceeds parser bound",
+            ));
+        }
+        if input.len() > limits.max_input_bytes {
+            return Err(XmlError::Strict("input size limit"));
+        }
+        check_characters(core::str::from_utf8(input).map_err(XmlError::InvalidUtf8)?)?;
+        let mut parser = Self::new(input);
+        parser.reader.config_mut().trim_text(false);
+        parser
+            .reader
+            .resolver_mut()
+            .set_max_declarations_per_element(limits.max_attributes.min(256));
+        parser.strict = true;
+        parser.limits = Some(limits);
+        Ok(parser)
+    }
+
+    /// Byte offset of the most recently opened element in the original input.
+    pub fn last_node_start(&self) -> usize {
+        self.node_start_pos as usize
+    }
+
+    /// Byte offset immediately after the most recently consumed XML token.
+    pub fn input_offset(&self) -> usize {
+        // quick-xml consumes a UTF-8 BOM during initialization without counting
+        // its bytes in buffer_position. Our offsets refer to the original input.
+        self.reader.buffer_position() as usize
+            + if self.input.starts_with(b"\xef\xbb\xbf") {
+                3
+            } else {
+                0
+            }
     }
 
     /// Capture the current node as raw XML and skip past it.
@@ -126,7 +232,7 @@ impl<'de> XmlParser<'de> {
             }
         }
 
-        let end = self.reader.buffer_position() as usize;
+        let end = self.input_offset();
         let raw = &self.input[start..end];
         let s = core::str::from_utf8(raw).map_err(XmlError::InvalidUtf8)?;
         Ok(Cow::Borrowed(s))
@@ -134,6 +240,7 @@ impl<'de> XmlParser<'de> {
 
     /// Read the next raw event from quick-xml and convert to DomEvent.
     fn read_next(&mut self) -> Result<Option<DomEvent<'de>>, XmlError> {
+        let strict = self.strict;
         loop {
             match self.state {
                 ParserState::Done => return Ok(None),
@@ -173,7 +280,12 @@ impl<'de> XmlParser<'de> {
                 ParserState::NeedNodeEnd => {
                     self.depth -= 1;
                     self.state = if self.depth == 0 {
-                        ParserState::Done
+                        if self.strict {
+                            self.root_closed = true;
+                            ParserState::Ready
+                        } else {
+                            ParserState::Done
+                        }
                     } else {
                         ParserState::InChildren
                     };
@@ -182,19 +294,54 @@ impl<'de> XmlParser<'de> {
 
                 ParserState::Ready | ParserState::InChildren => {
                     // Record position before reading (for raw capture)
-                    let pos_before = self.reader.buffer_position();
+                    let pos_before = self.input_offset() as u64;
 
                     self.buf.clear();
                     let (resolve, event) = self
                         .reader
                         .read_resolved_event_into(&mut self.buf)
-                        .map_err(|e| XmlError::Parse(e.to_string()))?;
+                        .map_err(|e| parser_error(strict, e))?;
+
+                    if let Some(limits) = self.limits {
+                        self.raw_events += 1;
+                        if self.raw_events > limits.max_events {
+                            return Err(XmlError::Strict("event count limit"));
+                        }
+                    }
 
                     // Resolve element namespace upfront
-                    let elem_ns = resolve_namespace(resolve)?;
+                    let elem_ns = resolve_namespace(
+                        resolve,
+                        self.strict,
+                        self.limits,
+                        &mut self.decoded_bytes,
+                    )?;
 
                     match event {
                         Event::Start(ref e) | Event::Empty(ref e) => {
+                            if self.strict && self.depth == 0 {
+                                if self.root_seen {
+                                    return Err(XmlError::Strict("multiple document roots"));
+                                }
+                                self.root_seen = true;
+                            }
+                            if let Some(limits) = self.limits {
+                                if self.depth >= limits.max_depth {
+                                    return Err(XmlError::Strict("element depth limit"));
+                                }
+                                if e.attributes().count() > limits.max_attributes {
+                                    return Err(XmlError::Strict("attribute count limit"));
+                                }
+                            }
+                            if strict {
+                                check_name(e.name().as_ref())?;
+                                if e.name().as_ref().starts_with(b"xmlns:") {
+                                    return Err(XmlError::Strict(
+                                        "reserved element namespace prefix",
+                                    ));
+                                }
+                                check_attribute_separators(e.as_ref(), e.name().as_ref().len())?;
+                            }
                             let is_empty = matches!(event, Event::Empty(_));
                             // Record start position for potential raw capture
                             self.node_start_pos = pos_before;
@@ -203,6 +350,7 @@ impl<'de> XmlParser<'de> {
                             let local_name = e.local_name();
                             let local = core::str::from_utf8(local_name.as_ref())
                                 .map_err(XmlError::InvalidUtf8)?;
+                            charge_decoded(self.limits, &mut self.decoded_bytes, local.len())?;
                             let local_owned = local.to_string();
 
                             // Collect attributes
@@ -210,30 +358,98 @@ impl<'de> XmlParser<'de> {
                             self.attr_idx = 0;
 
                             for attr in e.attributes() {
-                                let attr = attr.map_err(|e| XmlError::Parse(e.to_string()))?;
+                                let attr = attr.map_err(|e| parser_error(strict, e))?;
 
                                 // Skip xmlns declarations
                                 let key = attr.key;
+                                if strict {
+                                    check_name(key.as_ref())?;
+                                }
                                 if key.as_ref() == b"xmlns" {
+                                    check_namespace_declaration(self.limits, attr.value.as_ref())?;
                                     continue;
                                 }
                                 if let Some(prefix) = key.prefix()
                                     && prefix.as_ref() == b"xmlns"
                                 {
+                                    check_namespace_declaration(self.limits, attr.value.as_ref())?;
+                                    if strict && attr.value.is_empty() {
+                                        return Err(XmlError::Strict(
+                                            "empty prefixed namespace declaration",
+                                        ));
+                                    }
                                     continue;
                                 }
 
                                 let (attr_resolve, _) =
                                     self.reader.resolver().resolve_attribute(key);
-                                let attr_ns = resolve_namespace(attr_resolve)?;
+                                let attr_ns = resolve_namespace(
+                                    attr_resolve,
+                                    self.strict,
+                                    self.limits,
+                                    &mut self.decoded_bytes,
+                                )?;
                                 let attr_local_name = key.local_name();
                                 let attr_local = core::str::from_utf8(attr_local_name.as_ref())
                                     .map_err(XmlError::InvalidUtf8)?;
 
-                                let value = attr
-                                    .decode_and_unescape_value(self.reader.decoder())
-                                    .map_err(|e| XmlError::Parse(e.to_string()))?;
+                                if strict
+                                    && self.pending_attrs.iter().any(|(namespace, name, _)| {
+                                        namespace.as_deref() == attr_ns.as_deref()
+                                            && name == attr_local
+                                    })
+                                {
+                                    return Err(XmlError::Strict(
+                                        "duplicate expanded attribute name",
+                                    ));
+                                }
+                                let value = if strict {
+                                    check_attribute_references(attr.value.as_ref())?;
+                                    if attr
+                                        .value
+                                        .as_ref()
+                                        .iter()
+                                        .any(|byte| matches!(*byte, b'\t' | b'\r' | b'\n'))
+                                    {
+                                        return Err(XmlError::Strict(
+                                            "literal control whitespace in attribute",
+                                        ));
+                                    }
+                                    attr.decoded_and_normalized_value(
+                                        XmlVersion::Implicit1_0,
+                                        self.reader.decoder(),
+                                    )
+                                    .map_err(|e| parser_error(strict, e))?
+                                } else {
+                                    // Preserve the 0.39 Facet XML behavior. The 0.41
+                                    // convenience method now normalizes literal whitespace.
+                                    let decoded = self
+                                        .reader
+                                        .decoder()
+                                        .decode(attr.value.as_ref())
+                                        .map_err(|e| parser_error(strict, e))?;
+                                    Cow::Owned(
+                                        unescape(decoded.as_ref())
+                                            .map_err(|e| parser_error(strict, e))?
+                                            .into_owned(),
+                                    )
+                                };
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| value.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("attribute value limit"));
+                                }
 
+                                if strict {
+                                    check_characters(value.as_ref())?;
+                                }
+                                charge_decoded(
+                                    self.limits,
+                                    &mut self.decoded_bytes,
+                                    attr_local.len(),
+                                )?;
+                                charge_decoded(self.limits, &mut self.decoded_bytes, value.len())?;
                                 self.pending_attrs.push((
                                     attr_ns,
                                     attr_local.to_string(),
@@ -256,16 +472,43 @@ impl<'de> XmlParser<'de> {
                             }));
                         }
                         Event::End(_) => {
+                            if self.strict && self.depth == 0 {
+                                return Err(XmlError::Strict("unmatched closing element"));
+                            }
                             self.state = ParserState::NeedChildrenEnd;
                         }
                         Event::Text(e) => {
-                            let text = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
+                            let text = e.decode().map_err(|e| parser_error(strict, e))?;
+                            if self.strict {
+                                if self.depth == 0 {
+                                    if xml_whitespace(text.as_ref()) {
+                                        continue;
+                                    }
+                                    return Err(XmlError::Strict("text outside document root"));
+                                }
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| text.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("text value limit"));
+                                }
+                                if text.contains("]]>") {
+                                    return Err(XmlError::Strict(
+                                        "CDATA closing delimiter in text",
+                                    ));
+                                }
+                                charge_decoded(self.limits, &mut self.decoded_bytes, text.len())?;
+                                return Ok(Some(DomEvent::Text(Cow::Owned(text.into_owned()))));
+                            }
                             let trimmed = text.trim();
                             if !trimmed.is_empty() {
                                 return Ok(Some(DomEvent::Text(Cow::Owned(trimmed.to_string()))));
                             }
                         }
                         Event::CData(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("CDATA is not supported"));
+                            }
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             if !text.is_empty() {
@@ -273,11 +516,19 @@ impl<'de> XmlParser<'de> {
                             }
                         }
                         Event::Comment(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("comments are not supported"));
+                            }
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             return Ok(Some(DomEvent::Comment(Cow::Owned(text.to_string()))));
                         }
                         Event::PI(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict(
+                                    "processing instructions are not supported",
+                                ));
+                            }
                             let content =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             let (target, data) = content
@@ -288,22 +539,84 @@ impl<'de> XmlParser<'de> {
                                 data: Cow::Owned(data.trim().to_string()),
                             }));
                         }
-                        Event::Decl(_) => {
-                            // XML declaration - skip
+                        Event::Decl(e) => {
+                            if strict {
+                                if self.root_seen || self.decl_seen {
+                                    return Err(XmlError::Strict(
+                                        "duplicate or misplaced XML declaration",
+                                    ));
+                                }
+                                let before = &self.input[..pos_before as usize];
+                                if !before.is_empty() && before != b"\xef\xbb\xbf" {
+                                    return Err(XmlError::Strict("misplaced XML declaration"));
+                                }
+                                check_declaration(e.as_ref())?;
+                                self.decl_seen = true;
+                                if e.xml_version()
+                                    .map_err(|error| parser_error(strict, error))?
+                                    != XmlVersion::Explicit1_0
+                                {
+                                    return Err(XmlError::Strict("unsupported XML version"));
+                                }
+                                if let Some(encoding) = e.encoding() {
+                                    let encoding =
+                                        encoding.map_err(|error| parser_error(strict, error))?;
+                                    if !encoding.as_ref().eq_ignore_ascii_case(b"UTF-8") {
+                                        return Err(XmlError::Strict("unsupported XML encoding"));
+                                    }
+                                }
+                            }
                         }
                         Event::DocType(e) => {
+                            if self.strict {
+                                return Err(XmlError::Strict("DOCTYPE is not supported"));
+                            }
                             // Parse DOCTYPE declaration and emit as DomEvent
                             let text =
                                 core::str::from_utf8(e.as_ref()).map_err(XmlError::InvalidUtf8)?;
                             return Ok(Some(DomEvent::Doctype(Cow::Owned(text.to_string()))));
                         }
                         Event::Eof => {
+                            if self.strict
+                                && (!self.root_seen || !self.root_closed || self.depth != 0)
+                            {
+                                return Err(XmlError::Strict("incomplete XML document"));
+                            }
                             self.state = ParserState::Done;
                             return Ok(None);
                         }
                         Event::GeneralRef(e) => {
-                            let raw = e.decode().map_err(|e| XmlError::Parse(e.to_string()))?;
-                            let resolved = resolve_entity(&raw)?;
+                            let raw = e.decode().map_err(|e| parser_error(strict, e))?;
+                            if strict {
+                                check_reference(&raw)?;
+                            }
+                            let resolved = resolve_entity(&raw).map_err(|error| {
+                                if strict {
+                                    XmlError::Strict("malformed XML entity")
+                                } else {
+                                    error
+                                }
+                            })?;
+                            if self.strict {
+                                if self.depth == 0 {
+                                    return Err(XmlError::Strict("entity outside document root"));
+                                }
+                                if resolved.starts_with('&') && resolved.ends_with(';') {
+                                    return Err(XmlError::Strict("unknown entity"));
+                                }
+                                check_characters(&resolved)?;
+                                if self
+                                    .limits
+                                    .is_some_and(|limits| resolved.len() > limits.max_value_bytes)
+                                {
+                                    return Err(XmlError::Strict("text value limit"));
+                                }
+                                charge_decoded(
+                                    self.limits,
+                                    &mut self.decoded_bytes,
+                                    resolved.len(),
+                                )?;
+                            }
                             return Ok(Some(DomEvent::Text(Cow::Owned(resolved))));
                         }
                     }
@@ -358,11 +671,49 @@ impl<'de> DomParser<'de> for XmlParser<'de> {
     }
 }
 
+fn parser_error(strict: bool, error: impl fmt::Display) -> XmlError {
+    if strict {
+        XmlError::Strict("malformed XML")
+    } else {
+        XmlError::Parse(error.to_string())
+    }
+}
+
+fn check_namespace_declaration(
+    limits: Option<StrictXmlLimits>,
+    value: &[u8],
+) -> Result<(), XmlError> {
+    if let Some(limits) = limits {
+        if value.len() > limits.max_value_bytes {
+            return Err(XmlError::Strict("namespace value limit"));
+        }
+        core::str::from_utf8(value).map_err(XmlError::InvalidUtf8)?;
+        if value
+            .iter()
+            .any(|byte| matches!(*byte, b'&' | b'<' | b'\t' | b'\r' | b'\n'))
+        {
+            return Err(XmlError::Strict("unsupported namespace declaration value"));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a namespace from quick-xml's ResolveResult.
-fn resolve_namespace(resolve: ResolveResult<'_>) -> Result<Option<String>, XmlError> {
+fn resolve_namespace(
+    resolve: ResolveResult<'_>,
+    strict: bool,
+    limits: Option<StrictXmlLimits>,
+    decoded_bytes: &mut usize,
+) -> Result<Option<String>, XmlError> {
     match resolve {
+        ResolveResult::Bound(ns) if strict => {
+            let value = core::str::from_utf8(ns.as_ref()).map_err(XmlError::InvalidUtf8)?;
+            charge_decoded(limits, decoded_bytes, value.len())?;
+            Ok(Some(value.to_owned()))
+        }
         ResolveResult::Bound(ns) => Ok(Some(String::from_utf8_lossy(ns.as_ref()).into_owned())),
         ResolveResult::Unbound => Ok(None),
+        ResolveResult::Unknown(_) if strict => Err(XmlError::Strict("undeclared namespace prefix")),
         ResolveResult::Unknown(_) => Ok(None),
     }
 }
@@ -388,4 +739,21 @@ fn resolve_entity(raw: &str) -> Result<String, XmlError> {
     }
 
     Ok(format!("&{};", raw))
+}
+
+fn charge_decoded(
+    limits: Option<StrictXmlLimits>,
+    total: &mut usize,
+    bytes: usize,
+) -> Result<(), XmlError> {
+    if let Some(limits) = limits {
+        let next = total
+            .checked_add(bytes)
+            .ok_or(XmlError::Strict("decoded byte limit"))?;
+        if next > limits.max_decoded_bytes {
+            return Err(XmlError::Strict("decoded byte limit"));
+        }
+        *total = next;
+    }
+    Ok(())
 }
