@@ -1,14 +1,17 @@
 [package]
 name = "teamy-facet-xml-node"
-version = "0.50.0-rc.7"
+version = "0.50.0-rc.8"
 
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Raw XML node types for facet-xml - represent arbitrary XML without a schema"
+description = "TeamDman-maintained fork of facet-xml-node: raw XML nodes and a bounded namespace-aware read model"
 keywords = ["xml", "dom", "node", "facet", "serialization"]
 categories = ["encoding", "parsing"]
+homepage = "https://github.com/TeamDman/facet-format"
+documentation = "https://docs.rs/teamy-facet-xml-node"
+readme = "README.md"
 
 [package.metadata]
 

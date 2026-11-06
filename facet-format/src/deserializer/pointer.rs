@@ -88,10 +88,12 @@ impl<'parser, 'input, const BORROW: bool> FormatDeserializer<'parser, 'input, BO
                     ));
                 }
             }
-            // Other Cow types - use begin_inner
+            // Other Cow types use the pointer construction contract. Entering
+            // the pointee also preserves its proxy and validation strategy;
+            // Cow's opaque layout has no field for begin_inner to select.
             let _guard = SpanGuard::new(self.last_span);
             wip = wip
-                .begin_inner()?
+                .begin_smart_ptr()?
                 .with(|w| self.deserialize_into_inner(w, meta))?
                 .end()?;
             return Ok(wip);

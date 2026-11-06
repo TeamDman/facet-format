@@ -6,10 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Tree-based (DOM) deserializer for facet - supports HTML and XML"
+description = "TeamDman-maintained fork of facet-dom: tree-based serialization and deserialization for HTML and XML"
 keywords = ["dom", "html", "xml", "facet", "deserialization"]
 categories = ["encoding", "parsing", "web-programming"]
-homepage = "https://facet.rs"
+homepage = "https://github.com/TeamDman/facet-format"
+documentation = "https://docs.rs/teamy-facet-dom"
+readme = "README.md"
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]

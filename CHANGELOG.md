@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Teamy Format/JSON/Value/CSV 0.50.0-rc.10 preparation
+
+- Decode generic `Cow<T>` values through their smart-pointer pointee so the contained type's validating proxy runs. Preserve the existing borrowed string and byte decoding paths.
+- Align JSON, Value, and CSV with the corrected Format release. JSON and CSV use the Facet facade at `0.50.0-rc.8`; the core/reflection packages remain `0.50.0-rc.7`.
+
+### Teamy DOM/XML release preparation
+
+- Prepare the first `teamy-facet-dom` release at `0.50.0-rc.7` and `teamy-facet-xml` / `teamy-facet-xml-node` at `0.50.0-rc.8`, preserving their canonical Rust library names.
+- Include the merged strict XML parser with explicit limits, namespace-aware validation, redacted diagnostics, and a `quick-xml` `0.41.0` pin.
+- Include the namespace-aware XML read model with ordered attributes/content, original source bytes, and source ranges. Extracted values require caller validation before use in write requests.
+
 ## [Teamy Value 0.50.0-rc.9] - 2026-10-20
 
 ### Changed

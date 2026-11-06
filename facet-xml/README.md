@@ -1,11 +1,35 @@
-# facet-xml
+# teamy-facet-xml
 
-[![crates.io](https://img.shields.io/crates/v/facet-xml.svg)](https://crates.io/crates/facet-xml)
-[![documentation](https://docs.rs/facet-xml/badge.svg)](https://docs.rs/facet-xml)
-[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/facet-xml.svg)](./LICENSE)
-[![Discord](https://img.shields.io/discord/1379550208551026748?logo=discord&label=discord)](https://discord.gg/JhD7CwCJ8F)
+> **Unofficial fork:** `teamy-facet-xml` is maintained by
+> [TeamDman](https://github.com/TeamDman/facet-format), independently of facet-rs.
+> It is not an official upstream release. The implementation derives from
+> [official Facet Format at `4279debff780ae1cd5b028201f446c26594b1120`](https://github.com/facet-rs/facet-format/tree/4279debff780ae1cd5b028201f446c26594b1120).
+> Original attribution and the [MIT](LICENSE-MIT) OR [Apache-2.0](LICENSE-APACHE)
+> licenses are preserved. Fork issues belong in
+> [TeamDman/facet-format](https://github.com/TeamDman/facet-format/issues).
 
-# facet-xml
+Install with the original Rust import name and the matching Teamy facade:
+
+```toml
+[dependencies]
+facet = { package = "teamy-facet", version = "=0.50.0-rc.8" }
+facet-xml = { package = "teamy-facet-xml", version = "=0.50.0-rc.8" }
+```
+
+The Rust library name remains `facet_xml`. The Teamy graph retains
+Core/Reflect `0.50.0-rc.7`; official and Teamy Facet types have distinct
+Cargo identities. See the [fork release overview](https://github.com/TeamDman/facet-format/blob/teamy-main/README.md)
+for compatible packages and publication details.
+
+This fork also exposes strict parsing with explicit limits and namespace
+validation, using `quick-xml` 0.41.0. The upstream API overview follows.
+
+[![crates.io](https://img.shields.io/crates/v/teamy-facet-xml.svg)](https://crates.io/crates/teamy-facet-xml)
+[![documentation](https://docs.rs/teamy-facet-xml/badge.svg)](https://docs.rs/teamy-facet-xml)
+[![MIT/Apache-2.0 licensed](https://img.shields.io/crates/l/teamy-facet-xml.svg)](./LICENSE-MIT)
+[![Upstream Discord](https://img.shields.io/discord/1379550208551026748?logo=discord&label=discord)](https://discord.gg/JhD7CwCJ8F)
+
+## Upstream XML overview
 
 XML serialization and deserialization for Rust using the facet reflection framework.
 
