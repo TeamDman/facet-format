@@ -11,8 +11,8 @@ Install with the original Rust import name and the matching Teamy core:
 
 ```toml
 [dependencies]
-facet = { package = "teamy-facet", version = "=0.50.0-rc.7" }
-facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.9" }
+facet = { package = "teamy-facet", version = "=0.50.0-rc.8" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.10" }
 ```
 
 [![crates.io](https://img.shields.io/crates/v/teamy-facet-json.svg)](https://crates.io/crates/teamy-facet-json)
