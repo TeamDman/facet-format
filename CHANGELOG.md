@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Teamy JSON/CSV 0.50.0-rc.11 — 2026-11-16
+
+- Use Facet rc.9 and its shared nongeneric enum metadata. Serialization behavior is unchanged; Format, Value, Core and reflection package versions remain unchanged.
+
+
 ### Teamy Format/JSON/Value/CSV 0.50.0-rc.10 preparation
 
 - Decode generic `Cow<T>` values through their smart-pointer pointee so the contained type's validating proxy runs. Preserve the existing borrowed string and byte decoding paths.

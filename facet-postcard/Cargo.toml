@@ -44,7 +44,7 @@ chrono = { workspace = true, features = ["clock"] }
 divan = { workspace = true }
 facet = { workspace = true, features = ["std", "all-impls", "doc"] }
 facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.10", path = "../facet-format", features = [] }
-facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.10", path = "../facet-json" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.11", path = "../facet-json" }
 facet-json-classics = { path = "../facet-json-classics" }
 facet-testhelpers.workspace = true
 facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.10", path = "../facet-value" }

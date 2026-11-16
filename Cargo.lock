@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "autocfg",
  "teamy-facet-core",
@@ -3448,7 +3448,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-csv"
-version = "0.50.0-rc.10"
+version = "0.50.0-rc.11"
 dependencies = [
  "itoa",
  "teamy-facet",
@@ -3460,7 +3460,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-default"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "teamy-facet",
 ]
@@ -3488,7 +3488,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-error"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "teamy-facet",
 ]
@@ -3509,7 +3509,7 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-json"
-version = "0.50.0-rc.10"
+version = "0.50.0-rc.11"
 dependencies = [
  "axum-core",
  "bstr",
@@ -3560,14 +3560,14 @@ dependencies = [
 
 [[package]]
 name = "teamy-facet-macros"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "teamy-facet-macros-impl",
 ]
 
 [[package]]
 name = "teamy-facet-macros-impl"
-version = "0.50.0-rc.8"
+version = "0.50.0-rc.9"
 dependencies = [
  "proc-macro2",
  "quote",
