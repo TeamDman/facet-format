@@ -944,11 +944,13 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         {
             let proxy = key
                 .custom_serialization_with_proxy(proxy_def)
-                .map_err(|err| SerializeError::Unsupported(Cow::Owned(alloc::format!("{err}"))))?;
-            let proxy_peek = proxy.as_peek().innermost_peek();
-            let key = extract_string_from_peek(proxy_peek)
-                .map(ToString::to_string)
-                .unwrap_or_else(|| alloc::format!("{}", proxy_peek));
+                .map_err(|error| self.unsupported_error(key.shape(), &error.to_string()))?;
+            let key = proxy.with_peek(|proxy_peek| {
+                let proxy_peek = proxy_peek.innermost_peek();
+                extract_string_from_peek(proxy_peek)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| alloc::format!("{}", proxy_peek))
+            });
             return Ok(Cow::Owned(key));
         }
 
@@ -2286,8 +2288,8 @@ impl<'s, S: FormatSerializer> SerializeContext<'s, S> {
         // also owns deallocation after a failed conversion.
         let proxy = value
             .custom_serialization_with_proxy(proxy_def)
-            .map_err(|error| SerializeError::Unsupported(Cow::Owned(error.to_string())))?;
-        self.serialize_impl(proxy.as_peek())
+            .map_err(|error| self.unsupported_error(value.shape(), &error.to_string()))?;
+        proxy.with_peek(|value| self.serialize_impl(value))
     }
 }
 

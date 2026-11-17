@@ -437,8 +437,8 @@ where
                 if let Some(proxy_def) = proxy_def {
                     match field_value.custom_serialization_with_proxy(proxy_def) {
                         Ok(proxy_peek) => {
-                            serializer
-                                .attribute(&attr_name, proxy_peek.as_peek(), None)
+                            proxy_peek
+                                .with_peek(|proxy| serializer.attribute(&attr_name, proxy, None))
                                 .map_err(DomSerializeError::Backend)?;
                         }
                         Err(e) => {
@@ -538,11 +538,9 @@ where
                 // Use custom_serialization_with_proxy for proxy
                 match field_value.custom_serialization_with_proxy(proxy_def) {
                     Ok(proxy_peek) => {
-                        serialize_value(
-                            serializer,
-                            proxy_peek.as_peek(),
-                            field_element_name.as_deref(),
-                        )?;
+                        proxy_peek.with_peek(|proxy| {
+                            serialize_value(serializer, proxy, field_element_name.as_deref())
+                        })?;
                     }
                     Err(e) => {
                         return Err(DomSerializeError::Reflect(e));
@@ -866,8 +864,8 @@ where
             if let Some(proxy_def) = proxy_def {
                 match field_value.custom_serialization_with_proxy(proxy_def) {
                     Ok(proxy_peek) => {
-                        serializer
-                            .attribute(&attr_name, proxy_peek.as_peek(), None)
+                        proxy_peek
+                            .with_peek(|proxy| serializer.attribute(&attr_name, proxy, None))
                             .map_err(DomSerializeError::Backend)?;
                     }
                     Err(e) => {
@@ -956,11 +954,9 @@ where
         if let Some(proxy_def) = proxy_def {
             match field_value.custom_serialization_with_proxy(proxy_def) {
                 Ok(proxy_peek) => {
-                    serialize_value(
-                        serializer,
-                        proxy_peek.as_peek(),
-                        field_element_name.as_deref(),
-                    )?;
+                    proxy_peek.with_peek(|proxy| {
+                        serialize_value(serializer, proxy, field_element_name.as_deref())
+                    })?;
                 }
                 Err(e) => {
                     return Err(DomSerializeError::Reflect(e));
@@ -994,7 +990,7 @@ where
     match owned_peek {
         Some(proxy_peek) => {
             // proxy_peek is an OwnedPeek that will auto-deallocate on drop
-            serialize_value(serializer, proxy_peek.as_peek(), element_name)
+            proxy_peek.with_peek(|proxy| serialize_value(serializer, proxy, element_name))
         }
         None => {
             // No proxy on shape - this shouldn't happen since we checked proxy exists

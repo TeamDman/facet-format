@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Teamy borrowed path proxy release — 2026-11-17
+
+- Publish Dessert/DOM rc.8, Format/Value rc.11, JSON/CSV rc.12, and XML/XML Node rc.9 against Core/Reflect rc.8 and Facet rc.10.
+- Use bounded OwnedPeek::with_peek inspection in the shared serializer and DOM. Borrow UTF-8 PathBuf text through Core metadata instead of adding path-specific serializer branches.
+- Retain field context for proxy failures, including non-UTF-8 paths. Cover nested path values, map keys, borrowing, and existing proxy contracts.
+
+
+
 ### Teamy JSON/CSV 0.50.0-rc.11 — 2026-11-16
 
 - Use Facet rc.9 and its shared nongeneric enum metadata. Serialization behavior is unchanged; Format, Value, Core and reflection package versions remain unchanged.

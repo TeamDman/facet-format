@@ -14,11 +14,17 @@ continues in the [Facet monorepo](https://github.com/facet-rs/facet).
 Report Teamy packaging or fork issues to
 [TeamDman/facet-format](https://github.com/TeamDman/facet-format/issues).
 
-The publishing branch is `teamy-main`. Current release preparation updates
-Format, JSON, Value, and CSV to `0.50.0-rc.10`, alongside the first Teamy DOM/XML
-packages. Dessert remains `0.50.0-rc.7`. The graph uses the Facet facade and
-macro fix at `0.50.0-rc.8` with unchanged Core/Reflect packages at
-`0.50.0-rc.7`.
+The publishing branch is `teamy-main`. The current family uses Facet
+`0.50.0-rc.10` and Core/Reflect `0.50.0-rc.8` while retaining the
+derive packages at `0.50.0-rc.9`. Exact pins keep one reflection identity.
+
+`PathBuf` now owns its string wire representation through a Core `Cow<str>`
+proxy. UTF-8 path values borrow their text; non-UTF-8 paths fail without lossy
+replacement. The proxy holder still allocates, and map-key handling still
+copies key text. Shared Format and DOM traversal use the lifetime-safe
+`OwnedPeek::with_peek` callback instead of `as_peek`; invariant and
+contravariant proxy shapes are rejected. Conversion failures retain their
+containing type and field/index path in the shared serializer.
 
 Generic `Cow<T>` decoding now enters the smart-pointer pointee before decoding,
 so validating proxies on `T` are applied correctly. Existing borrowed string
@@ -32,24 +38,24 @@ bytes; callers must validate extracted values before constructing write requests
 
 | Package | Prepared version | Rust library name |
 | --- | --- | --- |
-| `teamy-facet-format` | `0.50.0-rc.10` | `facet_format` |
-| `teamy-facet-dessert` (unchanged) | `0.50.0-rc.7` | `facet_dessert` |
-| `teamy-facet-json` | `0.50.0-rc.10` | `facet_json` |
-| `teamy-facet-value` | `0.50.0-rc.10` | `facet_value` |
-| `teamy-facet-csv` | `0.50.0-rc.10` | `facet_csv` |
-| `teamy-facet-dom` (first Teamy release) | `0.50.0-rc.7` | `facet_dom` |
-| `teamy-facet-xml` | `0.50.0-rc.8` | `facet_xml` |
-| `teamy-facet-xml-node` | `0.50.0-rc.8` | `facet_xml_node` |
+| `teamy-facet-format` | `0.50.0-rc.11` | `facet_format` |
+| `teamy-facet-dessert` | `0.50.0-rc.8` | `facet_dessert` |
+| `teamy-facet-json` | `0.50.0-rc.12` | `facet_json` |
+| `teamy-facet-value` | `0.50.0-rc.11` | `facet_value` |
+| `teamy-facet-csv` | `0.50.0-rc.12` | `facet_csv` |
+| `teamy-facet-dom` | `0.50.0-rc.8` | `facet_dom` |
+| `teamy-facet-xml` | `0.50.0-rc.9` | `facet_xml` |
+| `teamy-facet-xml-node` | `0.50.0-rc.9` | `facet_xml_node` |
 
 Use Cargo package aliases to keep the original Rust import names:
 
 ```toml
 [dependencies]
-facet = { package = "teamy-facet", version = "=0.50.0-rc.8" }
-facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.10" }
-facet-dessert = { package = "teamy-facet-dessert", version = "=0.50.0-rc.7" }
-facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.10" }
-facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.10" }
+facet = { package = "teamy-facet", version = "=0.50.0-rc.10" }
+facet-format = { package = "teamy-facet-format", version = "=0.50.0-rc.11" }
+facet-dessert = { package = "teamy-facet-dessert", version = "=0.50.0-rc.8" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.12" }
+facet-value = { package = "teamy-facet-value", version = "=0.50.0-rc.11" }
 ```
 
 All public Facet types must come from the same Teamy core family. The fork
@@ -59,10 +65,8 @@ a consumer's `[patch.crates-io]`. Select only the format packages you need.
 For local development, clone [TeamDman/facet](https://github.com/TeamDman/facet)
 on `teamy-main` beside this repository as `../facet`. Versioned path
 dependencies use that checkout locally and become registry dependencies in
-Cargo's published manifests. Publish the changed Teamy core packages first.
-The existing Core/Reflect and Dessert `0.50.0-rc.7` releases remain dependencies;
-they do not need another release. Publish `teamy-facet-format` before
-`teamy-facet-json`, `teamy-facet-value`, and `teamy-facet-csv`.
+Cargo's published manifests. Publish the matching Teamy core packages first,
+then Dessert and Format, followed by JSON, Value, and CSV.
 For XML, publish `teamy-facet-dom`, then `teamy-facet-xml`, then
 `teamy-facet-xml-node`. DOM uses the official `facet-singularize` package for
 English singularization; its default features do not enable Facet dependencies.
